@@ -482,29 +482,29 @@ class SpectrumEncoder(torch.nn.Module):
             self.peak_encoder = torch.nn.Linear(2, dim_model)
 
         # The Transformer layers:
-        # layer = torch.nn.TransformerEncoderLayer(
-        #     d_model=dim_model,
-        #     nhead=n_head,
-        #     dim_feedforward=dim_feedforward,
-        #     batch_first=True,
-        #     dropout=dropout,
-        # )
-        layer = TransformerEncoderLayerWithAttnRec(
+        layer = torch.nn.TransformerEncoderLayer(
             d_model=dim_model,
             nhead=n_head,
             dim_feedforward=dim_feedforward,
             batch_first=True,
             dropout=dropout,
         )
-
-        # self.transformer_encoder = torch.nn.TransformerEncoder(
-        #     layer,
-        #     num_layers=n_layers,
+        # layer = TransformerEncoderLayerWithAttnRec(
+        #     d_model=dim_model,
+        #     nhead=n_head,
+        #     dim_feedforward=dim_feedforward,
+        #     batch_first=True,
+        #     dropout=dropout,
         # )
-        self.transformer_encoder = TransformerEncoderWithAttnRec(
+
+        self.transformer_encoder = torch.nn.TransformerEncoder(
             layer,
             num_layers=n_layers,
         )
+        # self.transformer_encoder = TransformerEncoderWithAttnRec(
+        #     layer,
+        #     num_layers=n_layers,
+        # )
 
     def forward(self, spectra):
         """The forward pass.
@@ -613,7 +613,6 @@ class _PeptideTransformer(torch.nn.Module):
         """
         if not isinstance(sequence, str):
             return sequence  # Assume it is already tokenized.
-
         sequence = sequence.replace("I", "L")
         sequence = re.split(r"(?<=.)(?=[A-Z])", sequence)
         if self.reverse:
