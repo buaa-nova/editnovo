@@ -1,6 +1,8 @@
 """Simple encoders for input into Transformers and the like."""
 import math
+import os
 
+from matplotlib import pyplot as plt
 import torch
 import einops
 import numpy as np
@@ -203,4 +205,30 @@ class PositionalEncoder(FloatEncoder):
         sin_pos = torch.sin(sin_in / self.sin_term)
         cos_pos = torch.cos(cos_in / self.cos_term)
         encoded = torch.cat([sin_pos, cos_pos], axis=2)
+
+        # # === 7. 绘制热图 ===
+        # seq_len, d_model = encoded.shape[1], encoded.shape[2]
+        # plt.figure(figsize=(12, 5))
+        # # imshow 默认把第 0 维当做 y 轴，第 1 维当做 x 轴
+        # # 所以 encoded[k, i] 表示 “Position = k, Depth = i” 的值
+        # #
+        # # 这里用 cmap="RdBu"（红白蓝渐变），并且指定 vmin/vmax = -1/+1 保证颜色对应 [-1,1]
+        # encoded_batch = encoded.detach().cpu().numpy()  
+        # plt.imshow(
+        #     encoded_batch[0],  # 只绘制第一个样本的编码
+        #     aspect='auto',
+        #     interpolation='nearest',
+        #     cmap='RdBu',
+        #     vmin=-1.0,
+        #     vmax=+1.0
+        # )
+        # plt.colorbar(label="Encoding Value", fraction=0.046, pad=0.04)
+        # plt.xlabel("Depth", fontsize=12)
+        # plt.ylabel("Position", fontsize=12)
+        # plt.title(f"Positional Encoding Heatmap\n(seq_len={seq_len}, d_model={d_model})", fontsize=14)
+        # plt.xticks(np.arange(0, d_model, 16))   # x 轴每 16 个维度打一个刻度
+        # plt.yticks(np.arange(0, seq_len+1, 5))  # y 轴每 5 个位置打一个刻度
+        # plt.tight_layout()
+        # plt.savefig(os.path.join("/root/attennovo/heatmap_sample0.png"), dpi=200)
+        # plt.close()
         return encoded + X

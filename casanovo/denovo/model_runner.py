@@ -250,6 +250,7 @@ class ModelRunner:
             weight_decay=self.config.weight_decay,
             out_writer=self.writer,
             calculate_precision=self.config.calculate_precision,
+            max_decoder_iters=self.config.max_decoder_iters,
         )
 
         if self.model_filename is None:

@@ -41,14 +41,14 @@ random_seed: 454
 # Logging frequency in training steps.
 n_log: 1
 # Tensorboard directory to use for keeping track of training metrics.
-tb_summarywriter:
+tb_summarywriter: "/root/attennovo-loss/tensorboard/"
 # Save the top k model checkpoints during training. -1 saves all, and leaving
 # this field empty saves none.
 save_top_k: 10
 # Path to saved checkpoints.
-model_save_folder_path: "/root/casanovo/checkpoint"
+model_save_folder_path: "/root/attennovo/checkpoint"
 # Model validation and checkpointing frequency in training steps.
-val_check_interval: 5000
+val_check_interval: 1440
 
 # SPECTRUM PROCESSING OPTIONS
 # Number of the most intense peaks to retain, any remaining peaks are discarded.
@@ -73,8 +73,10 @@ n_head: 8
 dim_feedforward: 1024
 # Number of transformer layers in spectrum encoder and peptide decoder.
 n_layers: 9
+# Number of decoder iterations
+max_decoder_iters: 9
 # Dropout rate for model weights.
-dropout: 0.0
+dropout: 0.1
 # Number of dimensions to use for encoding peak intensity.
 # Projected up to `dim_model` by default and summed with the peak m/z encoding.
 dim_intensity:
@@ -93,9 +95,9 @@ train_label_smoothing: 0.01
 
 # TRAINING/INFERENCE OPTIONS
 # Number of spectra in one training batch.
-train_batch_size: 512
+train_batch_size: 8
 # Max number of training epochs.
-max_epochs: 21
+max_epochs: 20
 # Number of validation steps to run before training begins.
 num_sanity_val_steps: 0
 # Calculate peptide and amino acid precision during training.

@@ -5,6 +5,9 @@ import heapq
 import logging
 import warnings
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+import torch.nn.functional as F
+
+from casanovo.depthcharge.components.levenstein_util import is_a_loop, item
 
 from ..depthcharge.masses import PeptideMass
 import einops
@@ -20,6 +23,10 @@ from ..data import ms_io
 
 logger = logging.getLogger("casanovo")
 
+DecoderOut = collections.namedtuple(
+    "IterativeRefinementDecoderOut",
+    ["output_tokens", "output_scores", "attn", "step", "max_step", "history"],
+)
 
 class Spec2Pep(pl.LightningModule, ModelMixin):
     """
@@ -116,6 +123,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         cosine_schedule_period_iters: int = 600_000,
         out_writer: Optional[ms_io.MztabWriter] = None,
         calculate_precision: bool = False,
+        max_decoder_iters: int = 1,
+        eos_penalty : int = 0,
+        max_ratio: float = 0.5,
         **kwargs: Dict,
     ):
         super().__init__()
@@ -169,7 +179,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             self.residues
         )
         self.stop_token = self.decoder._aa2idx["$"]
-
+        self.max_iter = max_decoder_iters
+        self.eos_penalty = eos_penalty
+        self.max_ratio = max_ratio
         # Logging.
         self.calculate_precision = calculate_precision
         self.n_log = n_log
@@ -181,10 +193,12 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
 
         # Output writer during predicting.
         self.out_writer = out_writer
+        self.max_iter = max_decoder_iters
+        self.extra_ignored_ids = [self.decoder.pad, self.decoder.bos, self.decoder.eos]
 
     def forward(
         self, spectra: torch.Tensor, precursors: torch.Tensor
-    ) -> List[List[Tuple[float, np.ndarray, str]]]:
+    ) -> List[List[Dict]]:
         """
         Predict peptide sequences for a batch of MS/MS spectra.
 
@@ -207,11 +221,148 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             peptide predictions consists of a tuple with the peptide score,
             the amino acid scores, and the predicted peptide sequence.
         """
-        return self.beam_search_decode(
-            spectra.to(self.encoder.device),
-            precursors.to(self.decoder.device),
+       
+        # initailize
+        memory, memory_key_padding_mask = self.encoder(spectra)
+        # Prepare mass and charge
+        masses = self.decoder.mass_encoder(precursors[:, None, 0])
+        charges = self.decoder.charge_encoder(precursors[:, 1].int() - 1)
+        precursors = masses + charges[:, None, :]
+        bsz = spectra.size(0)
+        prev_decoder_out = self.initialize_output_tokens(memory)
+        sent_idxs = torch.arange(bsz)
+        prev_output_tokens = prev_decoder_out.output_tokens.clone()
+        finalized = [[] for _ in range(bsz)]
+        for step in range(self.max_iter + 1):
+            # decoder_options = {
+            #     "eos_penalty": self.eos_penalty,
+            #     "max_ratio": self.max_ratio,
+            # }
+            prev_decoder_out = prev_decoder_out._replace(
+                step=step,
+                max_step=self.max_iter + 1,
+            )
+
+            decoder_out = self.decoder.forward_decoder(
+                self.encoder, prev_decoder_out, precursors, memory, memory_key_padding_mask
+            )
+
+            
+            # terminate if there is a loop
+            terminated, out_tokens, out_scores, out_attn = is_a_loop(
+                prev_output_tokens,
+                decoder_out.output_tokens,
+                decoder_out.output_scores,
+                a = None,
+                padding_idx= self.decoder.pad,
+            )
+
+            decoder_out = decoder_out._replace(
+                output_tokens=out_tokens,
+                output_scores=out_scores,
+                attn=out_attn,
+            )
+           
+            if step == self.max_iter:  # reach last iteration, terminate
+                terminated.fill_(1)
+
+            # collect finalized sentences
+            finalized_idxs = sent_idxs[terminated.to(sent_idxs.device)]
+            finalized_tokens = decoder_out.output_tokens[terminated]
+            finalized_scores = decoder_out.output_scores[terminated]
+
+            for i in range(finalized_idxs.size(0)):
+                finalized[finalized_idxs[i]] = [
+                    self.finalized_hypos(
+                        self.decoder,
+                        step,
+                        finalized_tokens[i],
+                        finalized_scores[i],
+                        ignore_ids=self.extra_ignored_ids
+                    )
+                ]
+
+            # check if all terminated
+            if terminated.sum() == terminated.size(0):
+                break
+            
+            # for next step
+            not_terminated = ~terminated
+            prev_decoder_out = decoder_out._replace(
+                output_tokens=decoder_out.output_tokens[not_terminated],
+                output_scores=decoder_out.output_scores[not_terminated],
+            )
+
+            precursors, memory, memory_key_padding_mask = self.encoder.reorder_encoder_out(
+                precursors, memory, memory_key_padding_mask, not_terminated.nonzero(as_tuple=False).squeeze()
+            )
+            sent_idxs = sent_idxs[not_terminated.to(sent_idxs.device)]
+            prev_output_tokens = prev_decoder_out.output_tokens.clone()
+
+        return finalized
+
+
+    def finalized_hypos(self, decoder : PeptideDecoder, step, prev_out_token, prev_out_score, ignore_ids=None):
+
+        if ignore_ids is None:
+            # 默认只丢弃 pad
+            ignore_ids = [self.decoder.pad]
+        # 转成 tensor 放到同设备
+        ignore = torch.tensor(ignore_ids, device=prev_out_token.device, dtype=prev_out_token.dtype)
+
+        # 比较并聚合：先扩成 (L, len(ignore))，再 any(dim=1)
+        mask = ~(prev_out_token.unsqueeze(-1) == ignore).any(dim=1)
+        # mask[i]=True 表示保留该 token
+
+        # 2) 用 mask 取出所有“有效”token
+        tokens = prev_out_token[mask]
+
+        # 3) 如果有分数，一起按照同样的 mask 过滤并计算平均分
+        if prev_out_score is None or len(prev_out_score[mask]) == 0:
+            scores, score = None, None
+        else:
+            scores = prev_out_score[mask]
+            score  = scores.mean()
+
+        sequence = "".join(decoder.detokenize(tokens))
+        # 5) 把这些信息打包返回
+        return {
+            "steps":            step,       # 第几步/轮生成
+            "sequence":         sequence,     # 去 pad 之后的 token id 序列
+            "positional_scores": scores,    # 每个 token 的分数（可选）
+            "score":            score,      # 平均分（可选）
+        }    
+    
+
+    def initialize_output_tokens(self, memories: torch.Tensor):
+        """
+        初始化输出 token 和对应的 score 张量：
+        - output_tokens: LongTensor[B, 2]，第 0 列填 BOS，第 1 列填 EOS
+        - output_scores: Tensor[B, 2]，和 memories 同 dtype&device，全部置 0
+        """
+        bsz = memories.size(0)
+        device = memories.device
+        dtype = memories.dtype
+
+        # 1) output_tokens: 长度为 2，dtype 用 Long（整型），device 同 encoder 输出
+        initial_output_tokens = torch.zeros(bsz, 2, dtype=torch.long, device=device)
+        initial_output_tokens[:, 0] = self.decoder.bos  # BOS ID
+        initial_output_tokens[:, 1] = self.decoder.eos  # EOS ID
+
+        # 2) output_scores: shape 同 tokens，但 dtype&device 跟 memories 保持一致
+        initial_output_scores = torch.zeros(bsz, 2, dtype=dtype, device=device)
+
+    
+        return DecoderOut(
+            output_tokens=initial_output_tokens,
+            output_scores=initial_output_scores,
+            attn=None,
+            step=0,
+            max_step=0,
+            history=None,
         )
 
+        
     def beam_search_decode(
         self, spectra: torch.Tensor, precursors: torch.Tensor
     ) -> List[List[Tuple[float, np.ndarray, str]]]:
@@ -748,12 +899,40 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         torch.Tensor
             The loss of the training step.
         """
-        pred, truth = self._forward_step(*batch)
-        pred = pred[:, :-1, :].reshape(-1, self.decoder.vocab_size + 1)
-        if mode == "train":
-            loss = self.celoss(pred, truth.flatten())
-        else:
-            loss = self.val_celoss(pred, truth.flatten())
+        outputs = self._forward_step(*batch)
+        losses, nll_loss = [], []
+        for obj in outputs:
+            _losses = self._compute_loss(
+                outputs[obj].get("out"),
+                outputs[obj].get("tgt"),
+                outputs[obj].get("mask", None),
+                outputs[obj].get("ls", 0.0),
+                name=obj + "-loss",
+                factor=outputs[obj].get("factor", 1.0),
+                weight=outputs[obj].get("weight", None),
+            )
+            losses += [_losses]
+            if outputs[obj].get("nll_loss", False):
+                nll_loss += [_losses.get("nll_loss", 0.0)]
+
+
+        loss = sum(l["loss"] for l in losses)
+        nll_loss = sum(l for l in nll_loss) if len(nll_loss) > 0 else loss.new_tensor(0)
+
+        # NOTE:
+        # we don't need to use sample_size as denominator for the gradient
+        # here sample_size is just used for logging
+    
+        # logging_output = {
+        #     "loss": loss.data,
+        #     "nll_loss": nll_loss.data,
+        # }
+
+        # record mask-ins, word-ins, delete loss seperately
+        # for l in losses:
+        #     logging_output[l["name"]] = (
+        #         item(l["loss"].data / l["factor"])
+        #     )
         self.log(
             f"{mode}_CELoss",
             loss.detach(),
@@ -761,8 +940,72 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             on_epoch=True,
             sync_dist=True,
         )
+        # record mask-ins, word-ins, delete loss seperately
+        for l in losses:
+            self.log(
+                f"{mode}_{l['name']}",
+                l["loss"].detach(),
+                on_step=False,
+                on_epoch=True,
+                sync_dist=True,
+            )
         return loss
+        # pred, truth = self._forward_step(*batch)
+        # pred = pred[:, :-1, :].reshape(-1, self.decoder.vocab_size + 1)
+        # if mode == "train":
+        #     loss = self.celoss(pred, truth.flatten())
+        # else:
+        #     loss = self.val_celoss(pred, truth.flatten())
+        # self.log(
+        #     f"{mode}_CELoss",
+        #     loss.detach(),
+        #     on_step=False,
+        #     on_epoch=True,
+        #     sync_dist=True,
+        # )
+        # return loss
 
+
+    def _compute_loss(
+        self, outputs, targets, masks=None, label_smoothing=0.0, name="loss", factor=1.0, weight=None
+    ):
+        """
+        outputs: batch x len x d_model
+        targets: batch x len
+        masks:   batch x len
+
+        policy_logprob: if there is some policy
+            depends on the likelihood score as rewards.
+        """
+
+        def mean_ds(x: torch.Tensor, dim=None) -> torch.Tensor:
+            return (
+                x.float().mean().type_as(x)
+                if dim is None
+                else x.float().mean(dim).type_as(x)
+            )
+
+        if masks is not None:
+            outputs, targets = outputs[masks], targets[masks]
+
+        if masks is not None and not masks.any():
+            nll_loss = torch.tensor(0)
+            loss = nll_loss
+        else:
+            logits = F.log_softmax(outputs, dim=-1)
+
+            losses = F.nll_loss(logits, targets.to(logits.device), reduction="none", weight=weight)
+
+            nll_loss = mean_ds(losses)
+            if label_smoothing > 0:
+                loss = (
+                    nll_loss * (1 - label_smoothing) - mean_ds(logits) * label_smoothing
+                )
+            else:
+                loss = nll_loss
+
+        loss = loss * factor
+        return {"name": name, "loss": loss, "nll_loss": nll_loss, "factor": factor}
     def validation_step(
         self, batch: Tuple[torch.Tensor, torch.Tensor, List[str]], *args
     ) -> torch.Tensor:
@@ -789,8 +1032,8 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         # the predicted peptides.
         peptides_pred, peptides_true = [], batch[2]
         for spectrum_preds in self.forward(batch[0], batch[1]):
-            for _, _, pred in spectrum_preds:
-                peptides_pred.append(pred)
+            for pred_dict in spectrum_preds:
+                peptides_pred.append(pred_dict["sequence"])
 
         aa_precision, _, pep_precision = evaluate.aa_match_metrics(
             *evaluate.aa_match_batch(
@@ -843,7 +1086,11 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             batch[2],
             self.forward(batch[0], batch[1]),
         ):
-            for peptide_score, aa_scores, peptide in spectrum_preds:
+            # 遍历列表里的每个 dict
+            for pred in spectrum_preds:
+                peptide      = pred["sequence"] if len(pred["sequence"]) > 0 else ""
+                peptide_score= pred["score"].cpu().detach().numpy() if pred["score"] is not None else 0.0
+                aa_scores    = pred["positional_scores"].cpu().detach().numpy() if pred["positional_scores"] is not None else [0.0]
                 predictions.append(
                     (
                         spectrum_i,
@@ -865,6 +1112,15 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         metrics = {
             "step": self.trainer.global_step,
             "train": train_loss.item(),
+            "mask-ins-train": self.trainer.callback_metrics[
+                "train_mask_ins-loss"
+            ].detach().item(),
+            "word-ins-train": self.trainer.callback_metrics[
+                "train_word_ins-loss"
+            ].detach().item(),
+            "word-del-train": self.trainer.callback_metrics[
+                "train_word_del-loss"
+            ].detach().item(),
         }
         self._history.append(metrics)
         self._log_history()
@@ -877,6 +1133,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         metrics = {
             "step": self.trainer.global_step,
             "valid": callback_metrics["valid_CELoss"].detach().item(),
+            "mask-ins-valid": callback_metrics["valid_mask_ins-loss"].detach().item(),
+            "word-ins-valid": callback_metrics["valid_word_ins-loss"].detach().item(),
+            "word-del-valid": callback_metrics["valid_word_del-loss"].detach().item(),
         }
 
         if self.calculate_precision:
@@ -933,18 +1192,24 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         if len(self._history) == 0:
             return
         if len(self._history) == 1:
-            header = "Step\tTrain loss\tValid loss\t"
+            header = "Step\tTrain loss\tMask-ins-loss\tWord-ins-loss\tWord-del-loss\tValid loss\t"
             if self.calculate_precision:
                 header += "Peptide precision\tAA precision"
 
             logger.info(header)
         metrics = self._history[-1]
         if metrics["step"] % self.n_log == 0:
-            msg = "%i\t%.6f\t%.6f"
+            msg = "%i\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t"
             vals = [
                 metrics["step"],
                 metrics.get("train", np.nan),
+                metrics.get("mask-ins-train", np.nan),
+                metrics.get("word-ins-train", np.nan),
+                metrics.get("word-del-train", np.nan),
                 metrics.get("valid", np.nan),
+                metrics.get("mask-ins-valid", np.nan),
+                metrics.get("word-ins-valid", np.nan),
+                metrics.get("word-del-valid", np.nan),
             ]
 
             if self.calculate_precision:
@@ -958,7 +1223,13 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             if self.tb_summarywriter is not None:
                 for descr, key in [
                     ("loss/train_crossentropy_loss", "train"),
+                    ("loss/train_mask-ins_loss", "mask-ins-train"),
+                    ("loss/train_word-ins_loss", "word-ins-train"),
+                    ("loss/train_word-del_loss", "word-del-train"),
                     ("loss/val_crossentropy_loss", "valid"),
+                    ("loss/val_mask-ins_loss", "mask-ins-valid"),
+                    ("loss/val_word-ins_loss", "word-ins-valid"),
+                    ("loss/val_word-del_loss", "word-del-valid"),
                     ("eval/val_pep_precision", "valid_pep_precision"),
                     ("eval/val_aa_precision", "valid_aa_precision"),
                 ]:
