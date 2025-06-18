@@ -1,4 +1,5 @@
 """Base Transformer models for working with mass spectra and peptides"""
+import math
 import re
 
 import torch
@@ -454,11 +455,26 @@ class PeptideDecoder(_PeptideTransformer):
             self.aa_encoder.weight.shape[0],
             bias=False,
         )
+        self.final = torch.nn.Linear(dim_model, len(self._amino_acids) + 1)
+        self.final_mask_ins = torch.nn.Linear(self.output_embed_dim * 2, 32)
+        self.final_word_del = torch.nn.Linear(self.output_embed_dim, 2)
 
         self.output_projection.weight = self.aa_encoder.weight
         # del_word, ins_mask, ins_word
         self.early_exit = [9, 9, 9]
         assert len(self.early_exit) == 3
+        layer = torch.nn.TransformerDecoderLayer(
+            d_model=dim_model,
+            nhead=n_head,
+            dim_feedforward=dim_feedforward,
+            batch_first=True,
+            dropout=dropout,
+        )
+
+        self.transformer_decoder = torch.nn.TransformerDecoder(
+            layer,
+            num_layers=n_layers,
+        )
 
     def build_decoder_layer(self, embed_dim, n_head, dim_feedforward, dropout_p, no_encoder_attn=False):
         layer = TransformerDecoderLayerBase(embed_dim, n_head, dim_feedforward, dropout_p, no_encoder_attn)
@@ -624,10 +640,10 @@ class PeptideDecoder(_PeptideTransformer):
             prev_output_tokens, tgt_tokens, self.pad, self.unk
         )
         mask_ins_targets = mask_ins_targets.clamp(min=0, max=31)  # for safe prediction
-        loss_class_weights = torch.ones(32, device=mask_ins_targets.device)
-        loss_class_weights[0] = 2 # if mask_ins_targets is 0, it means no insertion, so we give it a higher weight
+        # loss_class_weights = torch.ones(32, device=mask_ins_targets.device)
+        # loss_class_weights[0] = 2 # if mask_ins_targets is 0, it means no insertion, so we give it a higher weight
         mask_ins_masks = prev_output_tokens[:, 1:].ne(self.pad)
-        # mask_ins_out shape: (batch_size, l - delete - 1, 32)
+        # # mask_ins_out shape: (batch_size, l - delete - 1, 32)
         mask_ins_out, _ = self.forward_mask_ins(
             normalize=False,
             precurosors=precursors,
@@ -670,7 +686,7 @@ class PeptideDecoder(_PeptideTransformer):
                 "tgt": mask_ins_targets,
                 "mask": mask_ins_masks, # shape: (batch_size, l - delete - 1)
                 "ls": 0.01,
-                "weight": loss_class_weights,
+                # "weight": loss_class_weights,
             },
             "word_ins": {
                 "out": word_ins_out,
@@ -688,6 +704,63 @@ class PeptideDecoder(_PeptideTransformer):
 
 
     def inject_noise(self, target_tokens):
+        def _random_mask(target_tokens):
+            """
+            随机在每条序列中连续掩码一段长度（至少1）。
+            输入:
+            target_tokens: LongTensor of shape (B, T)
+            输出:
+            prev_target_tokens: 同shape，掩码位置替换为 unk
+            """
+            import torch
+
+            # 特殊 token id
+            
+            B, T = target_tokens.size()
+
+            # 1) 找到可掩码的位置（排除 pad/bos/eos）
+            special = (target_tokens == self.pad) | (target_tokens == self.bos) | (target_tokens == self.eos)
+            valid_mask = ~special  # True 表示可掩码
+            valid_lens = valid_mask.sum(1).clamp(min=1)  # 每行可掩码数，至少1
+
+            # 2) 设置最小掩码长度
+            min_span = 2
+
+            # 3) 计算每条序列的长度范围 length_range = valid_lens - min_span + 1
+            #    该范围至少为 1，以便下面的随机采样
+            length_range = (valid_lens - min_span + 1).clamp(min=1)  # (B,)
+
+            # 4) 生成 [0,1) 的随机实数，用于映射到 [0, length_range)
+            rand_frac = torch.rand(B, device=target_tokens.device)  
+
+            # 5) span_lens = floor(rand_frac * length_range) + min_span
+            #    结果在 [min_span, valid_lens]（当 valid_lens>=min_span）  
+            span_lens = (rand_frac * length_range.float()).floor().long() + min_span  # (B,)
+
+            # # 6) 对于 valid_lens < min_span 的序列，直接让掩码长度等于它们本身的 valid_lens
+            # span_lens = torch.where(valid_lens < min_span, valid_lens, span_lens)
+
+            # 7) 起始位置的随机采样，同上逻辑
+            start_max = (valid_lens - span_lens).clamp(min=0)                # (B,)
+            rand_frac2 = torch.rand(B, device=target_tokens.device)
+            start_offsets = (rand_frac2 * (start_max.float() + 1)).floor().long()  # (B,)
+
+            # 8) 执行掩码，并标记边界
+            prev_target_tokens = target_tokens.clone()
+            edge_mask = torch.zeros(B, T, dtype=torch.bool, device=target_tokens.device)
+
+            for i in range(B):
+                pos = valid_mask[i].nonzero(as_tuple=False).view(-1)  # 所有可掩码位置索引
+                s, l = start_offsets[i].item(), span_lens[i].item()
+                span = pos[s : s + l]
+                prev_target_tokens[i, span] = self.unk
+
+                # 只在段的最左和最右打 True
+                edge_mask[i, span[0].item()] = True
+                edge_mask[i, span[-1].item()] = True
+
+            return prev_target_tokens, edge_mask
+
         def _random_delete(target_tokens):
            
 
@@ -724,6 +797,44 @@ class PeptideDecoder(_PeptideTransformer):
 
             return prev_target_tokens
 
+
+        def _random_mask_20pct(target_tokens):
+            """
+            随机在每条序列中掩码大约 20% 的可掩码 token。
+            输入:
+            target_tokens: LongTensor of shape (B, T)
+            返回:
+            prev_target_tokens: LongTensor (B, T)，掩码位置用 unk 替换
+            mask_positions:   BoolTensor  (B, T)，掩码位置为 True
+            """
+       
+
+         
+            B, T = target_tokens.size()
+
+            # 标记可掩码位置
+            special    = (target_tokens == self.pad) | (target_tokens == self.bos) | (target_tokens == self.eos)
+            valid_mask = ~special                         # (B, T)
+
+            prev = target_tokens.clone()
+            mask_positions = torch.zeros(B, T, dtype=torch.bool, device=target_tokens.device)
+
+            for i in range(B):
+                # 1) 找到第 i 条序列所有可掩码位置的索引
+                pos = valid_mask[i].nonzero(as_tuple=False).view(-1)
+                n_valid = pos.size(0)
+
+                # 2) 计算要掩码的数量 k = max(1, ceil(20% * n_valid))
+                k = max(1, math.ceil(n_valid * 0.2))
+
+                # 3) 随机打乱并选前 k 个
+                perm = torch.randperm(n_valid, device=target_tokens.device)
+                selected = pos[perm[:k]]
+
+                # 4) 应用掩码
+                prev[i, selected] = self.unk
+                mask_positions[i, selected] = True
+            return prev, mask_positions
 
         return _random_delete(target_tokens)
     
@@ -762,28 +873,36 @@ class PeptideDecoder(_PeptideTransformer):
         x = self.pos_encoder(tgt)
 
         # B x T x C -> T x B x C
-        x = x.transpose(0, 1)
-        attn = None
-        inner_states = [x]
-        layers = self.layers if layers is None else layers
-        early_exit = len(layers) if early_exit is None else early_exit
-        encoder_out = encoder_out.transpose(0, 1) if encoder_out is not None else None
+        # x = x.transpose(0, 1)
+        # attn = None
+        # inner_states = [x]
+        # layers = self.layers if layers is None else layers
+        # early_exit = len(layers) if early_exit is None else early_exit
+        # encoder_out = encoder_out.transpose(0, 1) if encoder_out is not None else None
         # decoder layers
-        for _, layer in enumerate(layers[:early_exit]):
-            x, attn = layer(
-                x,
-                encoder_out,
-                encoder_out_mask,
-                self_attn_mask=None,
-                self_attn_padding_mask=tgt_key_padding_mask,
-            )
-            inner_states.append(x)
+        # for _, layer in enumerate(layers[:early_exit]):
+        #     x, attn = layer(
+        #         x,
+        #         encoder_out,
+        #         encoder_out_mask,
+        #         self_attn_mask=None,
+        #         self_attn_padding_mask=tgt_key_padding_mask,
+        #     )
+        #     inner_states.append(x)
+        preds = self.transformer_decoder(
+            tgt=x,
+            memory=encoder_out,
+            tgt_mask=None,
+            tgt_key_padding_mask=tgt_key_padding_mask,
+            memory_key_padding_mask=encoder_out_mask.to(self.device),
+        )
 
 
         # T x B x C -> B x T x C
-        x = x.transpose(0, 1)
+        # x = x.transpose(0, 1)
 
-        return x, {"attn": attn, "inner_states": inner_states}
+        # return x, {"attn": attn, "inner_states": inner_states}
+        return preds, {"attn": None, "inner_states": None}
 
 
     def forward_word_ins(self, normalize, precurosors, encoder_out_mask,
@@ -797,7 +916,8 @@ class PeptideDecoder(_PeptideTransformer):
             layers=self.layers,
             **unused
         )
-        decoder_out = self.output_projection(features)
+        # decoder_out = self.output_projection(features)
+        decoder_out = self.final(features)
         if normalize:
             return F.log_softmax(decoder_out, -1), extra["attn"]
         return decoder_out, extra["attn"]
@@ -814,7 +934,8 @@ class PeptideDecoder(_PeptideTransformer):
             **unused
         )
         features_cat = torch.cat([features[:, :-1, :], features[:, 1:, :]], 2)
-        decoder_out = F.linear(features_cat, self.embed_mask_ins.weight)
+        # decoder_out = F.linear(features_cat, self.embed_mask_ins.weight)
+        decoder_out = self.final_mask_ins(features_cat)
         if normalize:
             return F.log_softmax(decoder_out, -1), extra["attn"]
         return decoder_out, extra["attn"]
@@ -831,7 +952,8 @@ class PeptideDecoder(_PeptideTransformer):
             layers=self.layers,
             **unused
         )
-        decoder_out = F.linear(features, self.embed_word_del.weight)
+        # decoder_out = F.linear(features, self.embed_word_del.weight)
+        decoder_out = self.final_word_del(features)
         if normalize:
             return F.log_softmax(decoder_out, -1), extra["attn"]
         return decoder_out, extra["attn"]   

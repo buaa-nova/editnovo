@@ -195,6 +195,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         self.out_writer = out_writer
         self.max_iter = max_decoder_iters
         self.extra_ignored_ids = [self.decoder.pad, self.decoder.bos, self.decoder.eos]
+        self.celoss = torch.nn.CrossEntropyLoss(
+            ignore_index=0, label_smoothing=0.01
+        )
 
     def forward(
         self, spectra: torch.Tensor, precursors: torch.Tensor
@@ -900,6 +903,20 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             The loss of the training step.
         """
         outputs = self._forward_step(*batch)
+        # logits = outputs["word_ins"].get("out")
+        # target_tokens = outputs["word_ins"].get("tgt")
+        # edge_mask = outputs["word_ins"].get("mask", None)
+        # # 将 logits 和真实目标 target_tokens 都 flatten
+        # logits_flat = logits.view(-1, logits.size(-1))        # (B*T, V)
+        # targets_flat = target_tokens.view(-1)                  # (B*T,)
+        # mask_flat = edge_mask.view(-1)                         # (B*T,)
+
+        # # 只挑出 edge_mask 为 True 的位置
+        # selected_logits = logits_flat[mask_flat]               # (N_edge, V)
+        # selected_targets = targets_flat[mask_flat]             # (N_edge,)
+
+        # loss = self.celoss(selected_logits, selected_targets)
+        # losses = [{"name": "word_ins-loss", "loss": loss, "factor": 1.0}]
         losses, nll_loss = [], []
         for obj in outputs:
             _losses = self._compute_loss(
