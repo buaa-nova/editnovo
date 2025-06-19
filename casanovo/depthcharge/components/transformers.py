@@ -414,7 +414,7 @@ class PeptideDecoder(_PeptideTransformer):
         n_layers=1,
         dropout=0,
         pos_encoder=True,
-        reverse=True,
+        reverse=False,
         residues="canonical",
         max_charge=5,
         max_ratio=None,
