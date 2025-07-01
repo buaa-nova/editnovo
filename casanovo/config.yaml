@@ -16,9 +16,9 @@ isotope_error_range: [0, 1]
 # The minimum length of predicted peptides.
 min_peptide_len: 6
 # Number of spectra in one inference batch.
-predict_batch_size: 512
+predict_batch_size: 256
 # Number of beams used in beam search.
-n_beams: 10
+n_beams: 5
 # Number of PSMs for each spectrum.
 top_match: 1
 # The hardware accelerator to use. Must be one of:
@@ -48,7 +48,8 @@ save_top_k: 10
 # Path to saved checkpoints.
 model_save_folder_path: "/root/attennovo/checkpoint"
 # Model validation and checkpointing frequency in training steps.
-val_check_interval: 1440
+val_check_interval: 5470
+# val_check_interval: 2
 
 # SPECTRUM PROCESSING OPTIONS
 # Number of the most intense peaks to retain, any remaining peaks are discarded.
@@ -95,14 +96,14 @@ train_label_smoothing: 0.01
 
 # TRAINING/INFERENCE OPTIONS
 # Number of spectra in one training batch.
-train_batch_size: 8
+train_batch_size: 512
 # Max number of training epochs.
-max_epochs: 20
+max_epochs: 30
 # Number of validation steps to run before training begins.
 num_sanity_val_steps: 0
 # Calculate peptide and amino acid precision during training.
 # This is expensive, so we recommend against it.
-calculate_precision: True
+calculate_precision: False
 
 # AMINO ACID AND MODIFICATION VOCABULARY
 residues:

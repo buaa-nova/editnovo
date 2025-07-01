@@ -183,11 +183,15 @@ def aa_match(
 
 
 def aa_match_batch(
+    logger,
     peptides1: Iterable,
     peptides2: Iterable,
     aa_dict: Dict[str, float],
     cum_mass_threshold: float = 0.5,
     ind_mass_threshold: float = 0.1,
+    steps: Iterable = None,
+    scores: Iterable = 0.0,
+    positional_scores: Iterable = None,
     mode: str = "best",
 ) -> Tuple[List[Tuple[np.ndarray, bool]], int, int]:
     """
@@ -221,7 +225,7 @@ def aa_match_batch(
         Total number of amino acids in the second list of peptide sequences.
     """
     aa_matches_batch, n_aa1, n_aa2 = [], 0, 0
-    for peptide1, peptide2 in zip(peptides1, peptides2):
+    for peptide1, peptide2, step, score, positional_score in zip(peptides1, peptides2, steps, scores, positional_scores):
         # Split peptides into individual AAs if necessary.
         if isinstance(peptide1, str):
             peptide1 = re.split(r"(?<=.)(?=[A-Z])", peptide1)
@@ -237,6 +241,25 @@ def aa_match_batch(
                 ind_mass_threshold,
                 mode,
             )
+        )
+        # —— D. 解包
+        flags = np.asarray(aa_matches_batch[-1][0], dtype=bool)       # 第一个元素：np.ndarray
+        full_match = bool(aa_matches_batch[-1][1])                    # 第二个元素：bool
+        # —— E. 统计匹配位置数量
+        match_count = int(flags.sum())
+        # —— F. 日志输出
+        # —— 在循环体内只打印内容，不带字段名
+        logger.info(
+            "%s | %s | %s | %d | %d | %d| %d | %.2f | %s",
+            "".join(peptide1),
+            "".join(peptide2),
+            full_match,
+            match_count,
+            len(peptide1),
+            len(peptide2),
+            step,
+            score,
+            positional_score,
         )
     return aa_matches_batch, n_aa1, n_aa2
 

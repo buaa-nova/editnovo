@@ -1,36 +1,40 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# 设置 MGF 文件所在目录
-data_dir="/root/data/dda-train-data/nine-species-main-mgf"
+# 1) 根目录和排除物种
+data_dir="/root/data/dda-train-data/revised_nine_species/9speciesbenchmark"
+exclude_species="H.-sapiens"
 
-# 指定要排除的物种（以 .mgf 文件名匹配）
-exclude_species="H.-sapiens"  # 修改这里可排除其他物种
-
-# 初始化训练文件数组
+# 2) 收集训练文件
 train_files=()
-
-# 遍历所有 .mgf 文件，排除指定的物种
-for file in "$data_dir"/*.mgf; do
-    if [[ -f "$file" && "$file" != *"$exclude_species"* ]]; then
-        train_files+=("$file")  # 添加符合条件的文件
-    fi
+for species_path in "$data_dir"/*; do
+  [[ -d "$species_path" ]] || continue
+  species=$(basename "$species_path")
+  if [[ "$species" == "$exclude_species" ]]; then
+    echo "Skipping excluded species: $species"
+    continue
+  fi
+  # 遍历该物种目录下的所有 .mgf
+  for mgf in "$species_path"/*.[mM][gG][fF]; do
+    [[ -f "$mgf" ]] || continue
+    train_files+=("$mgf")
+  done
 done
 
-# 构造训练命令
+# 3) 构造训练命令
 train_command=(
-    "python" "-m" "casanovo.casanovo" "train"
-    "${train_files[@]}"
+  python -m casanovo.casanovo train
+  "${train_files[@]}"
 )
 
-# 添加测试集（使用 -p 作为前缀）
-for file in /root/training_data/test/*.mgf; do
-    if [[ -f "$file" ]]; then
-        train_command+=("-p" "$file")
-    fi
+# 4) 加入测试集（-p 前缀）
+test_dir="/root/data/dda-train-data/revised-nine-species/H.-sapiens-sample"
+for mgf in "$test_dir"/*.[mM][gG][fF]; do
+  [[ -f "$mgf" ]] || continue
+  train_command+=(-p "$mgf")
 done
 
-# 打印最终训练命令（用于调试）
-echo "Training command: ${train_command[*]}"
-
-# 执行训练命令
+# 5) 打印并执行
+echo "Training command:"
+printf "  %q\n" "${train_command[@]}"
 "${train_command[@]}"

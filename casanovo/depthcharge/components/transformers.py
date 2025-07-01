@@ -1,6 +1,7 @@
 """Base Transformer models for working with mass spectra and peptides"""
 import math
 import re
+from typing import Dict
 
 import torch
 import torch.nn.functional as F
@@ -481,7 +482,8 @@ class PeptideDecoder(_PeptideTransformer):
         return layer
     
 
-    def forward_decoder(self, encoder, decoder_out, precursors, memory, memory_key_padding_mask, eos_penalty: float = 0):
+    def forward_decoder(self, step, encoder, decoder_out, precursors, memory, memory_key_padding_mask, eos_penalty: float = 0,
+                        early_exit: bool = False):
         output_tokens = decoder_out.output_tokens
         output_scores = decoder_out.output_scores
         bsz = output_tokens.size(0)
@@ -508,6 +510,7 @@ class PeptideDecoder(_PeptideTransformer):
                 )
             
             word_del_pred = word_del_score.max(-1)[1].bool()
+            before_output_tokens = output_tokens[can_del_word].clone()
             _tokens, _scores, _attn = _apply_del_words(
                 output_tokens[can_del_word],
                 output_scores[can_del_word],
@@ -519,6 +522,7 @@ class PeptideDecoder(_PeptideTransformer):
             )
             output_tokens = _fill(output_tokens, can_del_word, _tokens, self.pad)
             output_scores = _fill(output_scores, can_del_word, _scores, 0)
+            # print(f"step: {step}, word_del_pred: {word_del_pred}, before tokens:{before_output_tokens}, output_tokens: {_tokens}")
             
 
         # insert placeholders
@@ -555,15 +559,28 @@ class PeptideDecoder(_PeptideTransformer):
         # insert words
         can_ins_word = output_tokens.eq(self.unk).sum(1) > 0
         if can_ins_word.sum() != 0:
+            # print(f"step:{step}, can_ins_word: {can_ins_word.sum()}/{bsz} samples can insert words")
             precursors_tmp, memory_tmp, memory_key_padding_mask_tmp=_skip_encoder_out(encoder,
                                             precursors, memory, memory_key_padding_mask, can_ins_word)
+            # print(f"step:{step}, prev_output_tokens: {_skip(output_tokens, can_ins_word)}")
+            predict_mask_tokens = _skip(output_tokens, can_ins_word)
             word_ins_score, word_ins_attn = self.forward_word_ins(
                 normalize=True,
                 precurosors=precursors_tmp,
                 encoder_out_mask=memory_key_padding_mask_tmp,
                 encoder_out=memory_tmp,
-                prev_output_tokens=_skip(output_tokens, can_ins_word),
+                prev_output_tokens=predict_mask_tokens,
             )
+            # 2. 构造一个 mask，标记出 prev_tokens 中等于 self.unk 的位置
+            # unk_mask = _skip(output_tokens, can_ins_word).eq(self.unk)   # shape: [N, L], dtype=torch.bool
+
+            # 3. 方法一：直接用 boolean indexing，一次性拿出所有 UNK 位置的得分向量
+            #    结果 unk_scores.shape == [总UNK个数, V]
+            # unk_scores = word_ins_score[unk_mask]
+            if early_exit:
+                return word_ins_score, predict_mask_tokens, True
+            # print(self._idx2aa)
+            # print(f"step {step}, 所有UNK位置的 word_ins_score：", unk_scores)
             word_ins_score, word_ins_pred = word_ins_score.max(-1)
             _tokens, _scores = _apply_ins_words(
                 output_tokens[can_ins_word],
@@ -580,11 +597,131 @@ class PeptideDecoder(_PeptideTransformer):
         cut_off = output_tokens.ne(self.pad).sum(1).max()
         output_tokens = output_tokens[:, :cut_off]
         output_scores = output_scores[:, :cut_off]
+        if early_exit:
+            return output_scores, output_tokens, False
+        else:
+            return decoder_out._replace(
+                output_tokens=output_tokens,
+                output_scores=output_scores,
+            )
+
+    def forward_beam_decoder(self, step, encoder, decoder_out, precursors, memory, memory_key_padding_mask,
+                              eos_penalty: float = 0,
+                             ):
+        cache_result = Dict[int, list[tuple(torch.Tensor, torch.Tensor)]]()
+        output_tokens = decoder_out.output_tokens
+        output_scores = decoder_out.output_scores
+        bsz = output_tokens.size(0)
         
-        return decoder_out._replace(
-            output_tokens=output_tokens,
-            output_scores=output_scores,
-        )
+        if self.max_ratio is None:
+            max_lens = output_tokens.new_full((bsz,), 40, dtype=torch.long)
+        else:
+            src_lens = (~memory_key_padding_mask).sum(dim=1)
+            max_lens = (src_lens * self.max_ratio).clamp(min=10).long()
+
+        # delete words
+        # do not delete tokens if it is <s> </s>
+        can_del_word = output_tokens.ne(self.pad).sum(1) > 2
+        if can_del_word.sum() != 0:  # we cannot delete, skip
+            precursors_tmp, memory_tmp, memory_key_padding_mask_tmp=_skip_encoder_out(encoder,
+                                            precursors, memory, memory_key_padding_mask, can_del_word)
+            # word_del_scores: [b, L, 2]
+            word_del_score, _ = self.forward_word_del(
+                normalize=True,
+                precurosors=precursors_tmp,
+                encoder_out=memory_tmp,
+                encoder_out_mask=memory_key_padding_mask_tmp,
+                prev_output_tokens=_skip(output_tokens, can_del_word), # skip the samples that cannot delete
+                )
+            # word_del_pred: [b, L]
+            word_del_pred = word_del_score.max(-1)[1].bool()
+            before_output_tokens = output_tokens[can_del_word].clone()
+            _tokens, _scores, _attn = _apply_del_words(
+                output_tokens[can_del_word],
+                output_scores[can_del_word],
+                None,  # del attn
+                word_del_pred,
+                self.pad,
+                self.bos,
+                self.eos,
+            )
+            output_tokens = _fill(output_tokens, can_del_word, _tokens, self.pad)
+            output_scores = _fill(output_scores, can_del_word, _scores, 0)
+            # print(f"step: {step}, word_del_pred: {word_del_pred}, before tokens:{before_output_tokens}, output_tokens: {_tokens}")
+            
+
+        # insert placeholders
+        can_ins_mask = output_tokens.ne(self.pad).sum(1) < max_lens
+        if can_ins_mask.sum() != 0:
+            precursors_tmp, memory_tmp, memory_key_padding_mask_tmp=_skip_encoder_out(encoder,
+                                            precursors, memory, memory_key_padding_mask, can_ins_mask)
+            mask_ins_score, _ = self.forward_mask_ins(
+                normalize=True,
+                precurosors=precursors_tmp,
+                encoder_out=memory_tmp,
+                encoder_out_mask=memory_key_padding_mask_tmp,
+                prev_output_tokens=_skip(output_tokens, can_ins_mask)
+            )
+            if eos_penalty > 0.0:
+                mask_ins_score[:, :, 0] = mask_ins_score[:, :, 0] - eos_penalty
+            # mask_ins_pred: [b, L]
+            mask_ins_pred = mask_ins_score.max(-1)[1]
+            # clip the predicted insertion tokens to the maximum length
+            mask_ins_pred = torch.min(
+                mask_ins_pred, max_lens[can_ins_mask, None].expand_as(mask_ins_pred)
+            )
+
+            _tokens, _scores = _apply_ins_masks(
+                output_tokens[can_ins_mask],
+                output_scores[can_ins_mask],
+                mask_ins_pred,
+                self.pad,
+                self.unk,
+                self.eos,
+            )
+            output_tokens = _fill(output_tokens, can_ins_mask, _tokens, self.pad)
+            output_scores = _fill(output_scores, can_ins_mask, _scores, 0)
+
+        # insert words 
+        # can_ins_word shape: [b]
+        can_ins_word = output_tokens.eq(self.unk).sum(1) > 0
+        if can_ins_word.sum() != 0:
+            # print(f"step:{step}, can_ins_word: {can_ins_word.sum()}/{bsz} samples can insert words")
+            precursors_tmp, memory_tmp, memory_key_padding_mask_tmp=_skip_encoder_out(encoder,
+                                            precursors, memory, memory_key_padding_mask, can_ins_word)
+            # print(f"step:{step}, prev_output_tokens: {_skip(output_tokens, can_ins_word)}")
+            predict_mask_tokens = _skip(output_tokens, can_ins_word)
+            word_ins_score, word_ins_attn = self.forward_word_ins(
+                normalize=True,
+                precurosors=precursors_tmp,
+                encoder_out_mask=memory_key_padding_mask_tmp,
+                encoder_out=memory_tmp,
+                prev_output_tokens=predict_mask_tokens,
+            )
+
+            word_ins_score, word_ins_pred = word_ins_score.max(-1)
+            _tokens, _scores = _apply_ins_words(
+                output_tokens[can_ins_word],
+                output_scores[can_ins_word],
+                word_ins_pred,
+                word_ins_score,
+                self.unk,
+            )
+
+            output_tokens = _fill(output_tokens, can_ins_word, _tokens, self.pad)
+            output_scores = _fill(output_scores, can_ins_word, _scores, 0)
+
+        # delete some unnecessary paddings
+        cut_off = output_tokens.ne(self.pad).sum(1).max()
+        output_tokens = output_tokens[:, :cut_off]
+        output_scores = output_scores[:, :cut_off]
+        if early_exit:
+            return output_scores, output_tokens, False
+        else:
+            return decoder_out._replace(
+                output_tokens=output_tokens,
+                output_scores=output_scores,
+            )
 
 
     def forward(self, sequences, precursors, memory, memory_key_padding_mask):
@@ -701,6 +838,7 @@ class PeptideDecoder(_PeptideTransformer):
                 "mask": word_del_masks,
             },
         }
+
 
 
     def inject_noise(self, target_tokens):
