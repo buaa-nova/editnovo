@@ -34,6 +34,7 @@ for mgf in "$test_dir"/*.[mM][gG][fF]; do
   train_command+=(-p "$mgf")
 done
 
+
 # 5) 打印并执行
 echo "Training command:"
 printf "  %q\n" "${train_command[@]}"

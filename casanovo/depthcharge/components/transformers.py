@@ -1,7 +1,7 @@
 """Base Transformer models for working with mass spectra and peptides"""
 import math
 import re
-from typing import Dict
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -605,10 +605,12 @@ class PeptideDecoder(_PeptideTransformer):
                 output_scores=output_scores,
             )
 
-    def forward_beam_decoder(self, step, encoder, decoder_out, precursors, memory, memory_key_padding_mask,
-                              eos_penalty: float = 0,
-                             ):
-        cache_result = Dict[int, list[tuple(torch.Tensor, torch.Tensor)]]()
+    
+    
+
+    def forward_beam_decoder(self, encoder, decoder_out, precursors, memory, memory_key_padding_mask,
+                              n_beam, spectra_index):
+        cache_result: Dict[int, List[Tuple[torch.Tensor, torch.Tensor]]] = {}
         output_tokens = decoder_out.output_tokens
         output_scores = decoder_out.output_scores
         bsz = output_tokens.size(0)
@@ -621,6 +623,7 @@ class PeptideDecoder(_PeptideTransformer):
 
         # delete words
         # do not delete tokens if it is <s> </s>
+        del_batch_idxs = torch.tensor([], dtype=torch.int64, device=output_tokens.device)
         can_del_word = output_tokens.ne(self.pad).sum(1) > 2
         if can_del_word.sum() != 0:  # we cannot delete, skip
             precursors_tmp, memory_tmp, memory_key_padding_mask_tmp=_skip_encoder_out(encoder,
@@ -635,6 +638,12 @@ class PeptideDecoder(_PeptideTransformer):
                 )
             # word_del_pred: [b, L]
             word_del_pred = word_del_score.max(-1)[1].bool()
+            # 1) Did this sample delete **any** token?
+            del_any = word_del_pred.any(dim=1)  
+            #    shape: [b], True iff sample i has ≥1 deletion
+
+            # 2) Which sample-indices have deletions?
+            del_batch_idxs = del_any.nonzero(as_tuple=True)[0]
             before_output_tokens = output_tokens[can_del_word].clone()
             _tokens, _scores, _attn = _apply_del_words(
                 output_tokens[can_del_word],
@@ -662,8 +671,7 @@ class PeptideDecoder(_PeptideTransformer):
                 encoder_out_mask=memory_key_padding_mask_tmp,
                 prev_output_tokens=_skip(output_tokens, can_ins_mask)
             )
-            if eos_penalty > 0.0:
-                mask_ins_score[:, :, 0] = mask_ins_score[:, :, 0] - eos_penalty
+     
             # mask_ins_pred: [b, L]
             mask_ins_pred = mask_ins_score.max(-1)[1]
             # clip the predicted insertion tokens to the maximum length
@@ -685,6 +693,7 @@ class PeptideDecoder(_PeptideTransformer):
         # insert words 
         # can_ins_word shape: [b]
         can_ins_word = output_tokens.eq(self.unk).sum(1) > 0
+        ins_batch_idxs = can_ins_word.nonzero(as_tuple=True)[0]
         if can_ins_word.sum() != 0:
             # print(f"step:{step}, can_ins_word: {can_ins_word.sum()}/{bsz} samples can insert words")
             precursors_tmp, memory_tmp, memory_key_padding_mask_tmp=_skip_encoder_out(encoder,
@@ -698,31 +707,177 @@ class PeptideDecoder(_PeptideTransformer):
                 encoder_out=memory_tmp,
                 prev_output_tokens=predict_mask_tokens,
             )
+            word_ins_score_max, word_ins_pred_max = word_ins_score.max(-1)
+            # tokens_tmp, shape: [can_ins_word.sum() * n_beam, L] 
+            tokens_tmp, scores_tmp = self.greedy_k_best_on_masks(
+                    word_ins_score, 
+                    predict_mask_tokens, 
+                    n_beam,
+                )
+            for i in range(tokens_tmp.size(0)):
+                n_spectra = spectra_index[i // n_beam].item()
+                if n_spectra not in cache_result:
+                    cache_result[n_spectra] = []
+                cache_result[n_spectra].append(
+                    (tokens_tmp[i], scores_tmp[i])
+                )
+        # 2. process sequences that have only delete words
+        # True where x[i] is in y.
+        if len(del_batch_idxs) > 0:
+            mask = ~torch.isin(del_batch_idxs, ins_batch_idxs)
+            only_del = del_batch_idxs[mask]
+            # only_del: 1-D LongTensor of indices
+            if only_del.numel() > 0:
+                only_del_mask = torch.zeros(bsz, dtype=torch.bool, device=only_del.device)
+                only_del_mask[only_del] = True
+                precursors_tmp, memory_tmp, memory_key_padding_mask_tmp=_skip_encoder_out(encoder,
+                                                precursors, memory, memory_key_padding_mask, only_del_mask)
+                input_tokens = _skip(output_tokens, only_del_mask)
+                rescores, word_ins_attn = self.forward_word_ins(
+                    normalize=True,
+                    precurosors=precursors_tmp,
+                    encoder_out_mask=memory_key_padding_mask_tmp,
+                    encoder_out=memory_tmp,
+                    prev_output_tokens=input_tokens,
+                )
+                # 1) Make it [b, t, 1] so it lines up with the vocab‐dim of rescores
+                idx = input_tokens.unsqueeze(-1)           # → shape [b, t, 1]
+                # 2) Gather along dim=2 (the vocab dimension)
+                token_scores = rescores.gather(dim=2,       # which axis to index into
+                                            index=idx)   # shape [b, t, 1]
+                # 3) Squeeze out the size‐1 vocab axis
+                token_scores = token_scores.squeeze(2)      # → shape [b, t]
+                for i in range(token_scores.size(0)):
+                    n_spectra = spectra_index[only_del[i]].item()
+                    if n_spectra not in cache_result:
+                        cache_result[n_spectra] = []
+                    cache_result[n_spectra].append(
+                        (input_tokens[i], token_scores[i])
+                    )
+        # 3. process sequences not change
+        # 1) full range
+        all_idxs = torch.arange(bsz, device=del_batch_idxs.device)
 
-            word_ins_score, word_ins_pred = word_ins_score.max(-1)
-            _tokens, _scores = _apply_ins_words(
-                output_tokens[can_ins_word],
-                output_scores[can_ins_word],
-                word_ins_pred,
-                word_ins_score,
-                self.unk,
+        # 2) masks for being in del or ins
+        in_del = torch.isin(all_idxs, del_batch_idxs)    # True where idx ∈ del_batch_idxs
+        in_ins = torch.isin(all_idxs, ins_batch_idxs)    # True where idx ∈ ins_batch_idxs
+
+        # 3) combine: True only where in neither
+        no_change_idxs_mask = ~(in_del | in_ins)         # shape [bsz], bool
+
+        # (optional) the indices themselves:
+        no_change_idxs = all_idxs[no_change_idxs_mask]
+
+        for idx in no_change_idxs:
+            n_spectra = spectra_index[idx].item()
+            if n_spectra not in cache_result:
+                cache_result[n_spectra] = []
+            cache_result[n_spectra].append(
+                (output_tokens[idx], output_scores[idx])
             )
+        
+        return cache_result
+    def greedy_k_best_on_masks(
+        self,
+        word_ins_score: torch.Tensor,       # [B, T, V] raw logits
+        predict_mask_tokens: torch.Tensor,  # [B, T]
+        beam_size: int,                        # decoder.unk
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        For each sample, only positions where predict_mask_tokens==unk get a Top-K expansion.
+        All other positions keep their original token, and we pull their log-prob from word_ins_score.
+        Returns:
+        new_tokens: [B*beam_size, T]
+        new_scores: [B*beam_size, T]
+        """
+        device = word_ins_score.device
+        B, T, V = word_ins_score.shape
 
-            output_tokens = _fill(output_tokens, can_ins_word, _tokens, self.pad)
-            output_scores = _fill(output_scores, can_ins_word, _scores, 0)
+        # 1) Compute full log-probs and base scores for every (b,t)
+        # logp_all = torch.log_softmax(word_ins_score, dim=-1)                   # [B, T, V]
+        
+        base_scores = word_ins_score.gather(
+            dim=2,
+            index=predict_mask_tokens.unsqueeze(-1)                            # [B, T, 1]
+        ).squeeze(-1)                                                # [B, T]
 
-        # delete some unnecessary paddings
-        cut_off = output_tokens.ne(self.pad).sum(1).max()
-        output_tokens = output_tokens[:, :cut_off]
-        output_scores = output_scores[:, :cut_off]
-        if early_exit:
-            return output_scores, output_tokens, False
-        else:
-            return decoder_out._replace(
-                output_tokens=output_tokens,
-                output_scores=output_scores,
-            )
+        # 2) Prepare masks and outputs
+        mask_matrix = predict_mask_tokens.eq(self.unk)                             # [B, T]
+        new_tokens = torch.zeros(B, beam_size, T, dtype=torch.long, device=device)
+        new_scores = torch.zeros(B, beam_size, T, dtype=base_scores.dtype, device=device)
 
+        # Expand the “keep” parts across beams
+        keep_tokens = predict_mask_tokens.unsqueeze(1).expand(B, beam_size, T) # [B, S, T]
+        keep_scores = base_scores.unsqueeze(1).expand(B, beam_size, T)        # [B, S, T]
+
+        for b in range(B):
+            # which time‐steps to replace?
+            mask_idx = mask_matrix[b].nonzero(as_tuple=False).view(-1)        # [M]
+            M = mask_idx.numel()
+            if M == 0:
+                # no UNKs → copy original tokens & scores
+                new_tokens[b] = keep_tokens[b]
+                new_scores[b] = keep_scores[b]
+                continue
+
+            # 3) build and sort the log-probs only at the masked positions
+            logits_b     = word_ins_score[b, mask_idx]                       # [M, V]
+            # logp_b       = torch.log_softmax(logits_b, dim=-1)               # [M, V]
+            sorted_lp, sorted_idx = logits_b.sort(dim=-1, descending=True)     # [M, V]
+
+            # 4) greedy K-best across these M slots
+            results = []
+            init_ranks  = torch.zeros(M, dtype=torch.long, device=device)
+            init_scores = sorted_lp[torch.arange(M, device=device), init_ranks].clone()
+            results.append((init_ranks, init_scores))
+            used = {tuple(init_ranks.tolist())}
+
+            for _ in range(1, beam_size):
+                best = None
+                for prev_ranks, prev_scores_vec in results:
+                    for m in range(M):
+                        r = prev_ranks[m].item()
+                        if r + 1 < V:
+                            cand_ranks = prev_ranks.clone()
+                            cand_ranks[m] += 1
+                            key = tuple(cand_ranks.tolist())
+                            if key in used:
+                                continue
+                            cand_scores = prev_scores_vec.clone()
+                            cand_scores[m] = sorted_lp[m, cand_ranks[m]]
+                            s = cand_scores.sum().item()
+                            if best is None or s > best[0]:
+                                best = (s, cand_ranks, cand_scores)
+                if best is None:
+                    break
+                _, best_ranks, best_scores = best
+                results.append((best_ranks, best_scores))
+                used.add(tuple(best_ranks.tolist()))
+
+            # 5) materialize each beam
+            for k, (ranks, score_vec) in enumerate(results):
+                # token picks for the M masked slots
+                token_ids = sorted_idx[torch.arange(M, device=device), ranks]  # [M]
+
+                # full-length token sequence
+                seq_k = keep_tokens[b, 0].clone()      # [T]
+                seq_k[mask_idx] = token_ids
+                new_tokens[b, k] = seq_k
+
+                # full-length score sequence
+                sc_k = keep_scores[b, 0].clone()       # [T]
+                sc_k[mask_idx] = score_vec
+                new_scores[b, k] = sc_k
+
+            # 6) if fewer than beam_size candidates, pad with last
+            last = len(results) - 1
+            if last + 1 < beam_size:
+                for k in range(last + 1, beam_size):
+                    new_tokens[b, k] = new_tokens[b, last]
+                    new_scores[b, k] = new_scores[b, last]
+        new_tokens = new_tokens.view(B * beam_size, T)  # [B*S, T]
+        new_scores = new_scores.view(B * beam_size, T)  # [B*S, T]
+        return new_tokens, new_scores
 
     def forward(self, sequences, precursors, memory, memory_key_padding_mask):
         """Predict the next amino acid for a collection of sequences.

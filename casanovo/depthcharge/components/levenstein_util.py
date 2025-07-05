@@ -4,7 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from typing import Callable
+from typing import Callable, List, Tuple
 import warnings
 import torch
 import torch.nn.functional as F
@@ -341,6 +341,36 @@ def _skip_encoder_out(encoder, precursors, memory, memory_key_padding_mask, mask
             precursors, memory, memory_key_padding_mask, mask.nonzero(as_tuple=False).squeeze()
         )
 
+def strip_pad(x: torch.Tensor, pad_token: int) -> torch.Tensor:
+    # find all non-pad positions
+    nonpad = (x != pad_token).nonzero(as_tuple=True)[0]
+    if nonpad.numel() == 0:
+        # everything’s pad → return empty
+        return x.new_empty((0,), dtype=x.dtype)
+    last = nonpad.max().item()
+    return x[: last + 1]
+
+def equal_ignore_tokens(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    ignore_tokens: List[int],
+) -> bool:
+    """
+    Remove *all* occurrences of any token in `ignore_tokens` from both 1-D tensors a and b,
+    then return True if the filtered tensors are the same length and have identical contents.
+    """
+    # build a mask of positions *not* in ignore_tokens
+    # torch.isin requires PyTorch ≥ 1.10; if you’re on an older version, see the fallback below
+    ignore_tensor = torch.tensor(ignore_tokens, device=a.device, dtype=a.dtype)
+    mask_a = ~torch.isin(a, ignore_tensor)
+    mask_b = ~torch.isin(b, ignore_tensor)
+
+    # filter out all ignored tokens
+    a_filt = a[mask_a]
+    b_filt = b[mask_b]
+
+    # compare lengths and exact equality
+    return a_filt.numel() == b_filt.numel() and torch.equal(a_filt, b_filt)
 
 def _fill(x, mask, y, padding_idx):
     """
@@ -371,3 +401,8 @@ def _fill(x, mask, y, padding_idx):
     else:
         x[mask] = y
     return x
+
+
+
+
+          
