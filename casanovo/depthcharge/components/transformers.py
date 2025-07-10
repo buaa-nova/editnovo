@@ -419,6 +419,10 @@ class PeptideDecoder(_PeptideTransformer):
         residues="canonical",
         max_charge=5,
         max_ratio=None,
+        is_sampling_delete=False,
+        dual_training_for_deletion=False,
+        no_share_discriminator=False,
+        dual_training_for_insertion=False,
     ):
         """Initialize a PeptideDecoder"""
         super().__init__(
@@ -464,6 +468,10 @@ class PeptideDecoder(_PeptideTransformer):
         # del_word, ins_mask, ins_word
         self.early_exit = [9, 9, 9]
         assert len(self.early_exit) == 3
+        self.is_sampling_delete = is_sampling_delete
+        self.dual_training_for_deletion = dual_training_for_deletion
+        self.dual_training_for_insertion = dual_training_for_insertion
+        self.no_share_discriminator = no_share_discriminator
         layer = torch.nn.TransformerDecoderLayer(
             d_model=dim_model,
             nhead=n_head,
@@ -476,7 +484,20 @@ class PeptideDecoder(_PeptideTransformer):
             layer,
             num_layers=n_layers,
         )
-
+    
+        delete_layer = torch.nn.TransformerDecoderLayer(
+                d_model=dim_model,
+                nhead=n_head,
+                dim_feedforward=dim_feedforward,
+                batch_first=True,
+                dropout=dropout,
+        )
+        
+        self.transformer_delete_decoder = torch.nn.TransformerDecoder(
+            delete_layer,
+            num_layers=n_layers,
+        )
+        
     def build_decoder_layer(self, embed_dim, n_head, dim_feedforward, dropout_p, no_encoder_attn=False):
         layer = TransformerDecoderLayerBase(embed_dim, n_head, dim_feedforward, dropout_p, no_encoder_attn)
         return layer
@@ -951,13 +972,26 @@ class PeptideDecoder(_PeptideTransformer):
             encoder_out_mask=memory_key_padding_mask,
             prev_output_tokens=masked_tgt_tokens,
         )
-
+        B, T, V = word_ins_out.shape
         # make online prediction
-        word_predictions = F.log_softmax(word_ins_out, dim=-1).max(2)[1]
+        
+        # 1) Compute full softmax probabilities
+        greedy_idx = F.log_softmax(word_ins_out, dim=-1).max(2)[1]
+       
+        if self.is_sampling_delete:    
+            samples = torch.multinomial(
+                F.softmax(word_ins_out, -1).view(-1, word_ins_out.size(-1)), 1).view(
+                    word_ins_out.size(0), -1)
+            # 4) Choose 20% of the batch to “sample”
+            #    mask_batch is True for the 20% of rows we’ll sample
+            mask_batch = torch.rand(B, device=word_ins_out.device) < self.sampling_delete_prob  # (B,)
+            # Expand to (B, T) so we apply the same decision across all positions
+            mask = mask_batch.unsqueeze(1).expand(-1, T)    # (B, T)
 
-        word_predictions.masked_scatter_(
-            ~masked_tgt_masks, tgt_tokens[~masked_tgt_masks]
-        )
+            # 5) Combine: sampled rows use `samples`, others use `greedy_idx`
+            word_predictions = torch.where(mask, samples, greedy_idx)  # (B, T)
+        else:
+            word_predictions = greedy_idx
 
         # generate training labels for deletion
         # word_del_targets shape: (batch_size, l)
@@ -969,10 +1003,62 @@ class PeptideDecoder(_PeptideTransformer):
             encoder_out_mask=memory_key_padding_mask,
             prev_output_tokens=word_predictions,
         )
-
         word_del_masks = word_predictions.ne(self.pad)
+        del_out_dual = None
+        if self.dual_training_for_deletion:
+            
+            y0 = self.self_gen(precursors, memory, memory_key_padding_mask, tgt_tokens)
+            assert y0 is not None
+            del_input = y0
+            word_del_targets_dual = _get_del_targets(del_input, tgt_tokens, self.pad)
+            word_del_out_dual, _ = self.forward_word_del(
+                normalize=False,
+                precurosors=precursors,
+                encoder_out=memory,
+                encoder_out_mask=memory_key_padding_mask,
+                prev_output_tokens=del_input,
+            )
+            word_del_masks_dual = del_input.ne(self.pad)
+            # del_out_dual = {k + '_dual' : v for k,v in del_out_dual.items()}
+        if self.dual_training_for_insertion:
+            y0 = self.self_gen(precursors, memory, memory_key_padding_mask, tgt_tokens)
+            assert y0 is not None
+            word_del_for_y0 = _get_del_targets(y0, tgt_tokens, self.pad)
+            ins_input, _, _ = _apply_del_words(
+                y0,
+                None,
+                None,
+                word_del_for_y0.bool(),
+                self.pad,
+                self.bos,
+                self.eos,
+            )
+            # ins_out_dual = self.forward_ins(encoder_out, ins_input, tgt_tokens)
+            masked_tgt_masks_dual, masked_tgt_tokens_dual, mask_ins_targets_dual = _get_ins_targets(
+                ins_input, tgt_tokens, self.pad, self.unk
+            )
+            mask_ins_targets_dual = mask_ins_targets_dual.clamp(min=0, max=31)  # for safe prediction
+            # loss_class_weights = torch.ones(32, device=mask_ins_targets.device)
+            # loss_class_weights[0] = 2 # if mask_ins_targets is 0, it means no insertion, so we give it a higher weight
+            mask_ins_masks_dual = ins_input[:, 1:].ne(self.pad)
+            # # mask_ins_out shape: (batch_size, l - delete - 1, 32)
+            mask_ins_out_dual, _ = self.forward_mask_ins(
+                normalize=False,
+                precurosors=precursors,
+                encoder_out=memory,
+                encoder_out_mask=memory_key_padding_mask,
+                prev_output_tokens=ins_input,
+            )
+            # word_ins_out shape: (batch_size, l, vocab_size)
+            word_ins_out_dual, _ = self.forward_word_ins(
+                normalize=False,
+                precurosors=precursors,
+                encoder_out=memory,
+                encoder_out_mask=memory_key_padding_mask,
+                prev_output_tokens=masked_tgt_tokens_dual,
+            )
 
-        return {
+        results = {
             "mask_ins": {
                 "out": mask_ins_out,
                 "tgt": mask_ins_targets,
@@ -994,7 +1080,52 @@ class PeptideDecoder(_PeptideTransformer):
             },
         }
 
+        if self.dual_training_for_deletion:
+            results["word_del_dual"] = {
+                "out": word_del_out_dual,
+                "tgt": word_del_targets_dual,  # shape: (batch_size, l)
+                "mask": word_del_masks_dual,
+            }
+        if self.dual_training_for_insertion:
+            results["mask_ins_dual"] = {
+                "out": mask_ins_out_dual,
+                "tgt": mask_ins_targets_dual,
+                "mask": mask_ins_masks_dual,  # shape: (batch_size, l - delete - 1)
+                "ls": 0.01,
+                # "weight": loss_class_weights,
+            }
+            results["word_ins_dual"] = {
+                "out": word_ins_out_dual,
+                "tgt": tgt_tokens,
+                "mask": masked_tgt_masks_dual,  # shape: (batch_size, l)
+                "ls": 0.01,
+                "nll_loss": True,
+            }
+        return results
 
+    def self_gen(self, precursors, encoder_out, encoder_out_mask, tgt_tokens):
+
+        pad = self.pad
+        bos = self.bos
+        eos = self.eos
+        unk = self.unk
+
+        target_mask = (
+            tgt_tokens.eq(bos) | tgt_tokens.eq(eos) | tgt_tokens.eq(pad)
+        )
+        full_mask_target = tgt_tokens.masked_fill(~target_mask, unk)
+
+        with torch.no_grad():
+            word_ins_out = self.forward_word_ins(
+                normalize=True,
+                precurosors=precursors,
+                encoder_out_mask=encoder_out_mask,
+                encoder_out=encoder_out,
+                prev_output_tokens=full_mask_target,
+            )[0]
+            pred_tokens_corr = word_ins_out.argmax(-1)
+            pred_tokens_corr.masked_scatter_(target_mask, tgt_tokens)
+        return pred_tokens_corr
 
     def inject_noise(self, target_tokens):
         def _random_mask(target_tokens):
@@ -1053,8 +1184,9 @@ class PeptideDecoder(_PeptideTransformer):
                 edge_mask[i, span[-1].item()] = True
 
             return prev_target_tokens, edge_mask
-
-        def _random_delete(target_tokens):
+   
+        def _random_delete(target_tokens, 
+                           max_ratio: float = 0.0):
            
 
             max_len = target_tokens.size(1)
@@ -1071,6 +1203,12 @@ class PeptideDecoder(_PeptideTransformer):
 
             # do not delete <bos> and <eos> (we assign 0 score for them)
             target_cutoff = (
+                2
+                + (
+                    (target_length - 2)
+                    * target_score.new_zeros(target_score.size(0), 1).uniform_(max_ratio, 1.0)
+                ).long()
+            ) if max_ratio > 0 else (
                 2
                 + (
                     (target_length - 2)
@@ -1129,7 +1267,7 @@ class PeptideDecoder(_PeptideTransformer):
                 mask_positions[i, selected] = True
             return prev, mask_positions
 
-        return _random_delete(target_tokens)
+        return _random_delete(target_tokens, 0.0)
     
 
     def extract_features(
@@ -1138,6 +1276,7 @@ class PeptideDecoder(_PeptideTransformer):
         precursors_out,
         encoder_out=None,
         encoder_out_mask=None,
+        is_delete=False,
         early_exit=None,
         layers=None,
         **unused
@@ -1182,13 +1321,22 @@ class PeptideDecoder(_PeptideTransformer):
         #         self_attn_padding_mask=tgt_key_padding_mask,
         #     )
         #     inner_states.append(x)
-        preds = self.transformer_decoder(
-            tgt=x,
-            memory=encoder_out,
-            tgt_mask=None,
-            tgt_key_padding_mask=tgt_key_padding_mask,
-            memory_key_padding_mask=encoder_out_mask.to(self.device),
-        )
+        if is_delete and self.no_share_discriminator:
+            preds = self.transformer_delete_decoder(
+                tgt=x,
+                memory=encoder_out,
+                tgt_mask=None,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                memory_key_padding_mask=encoder_out_mask.to(self.device),
+            )
+        else:
+            preds = self.transformer_decoder(
+                tgt=x,
+                memory=encoder_out,
+                tgt_mask=None,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                memory_key_padding_mask=encoder_out_mask.to(self.device),
+            )
 
 
         # T x B x C -> B x T x C
@@ -1241,6 +1389,7 @@ class PeptideDecoder(_PeptideTransformer):
             precursors_out=precurosors,
             encoder_out=encoder_out,
             encoder_out_mask=encoder_out_mask,
+            is_delete=True,
             early_exit=self.early_exit[0],
             layers=self.layers,
             **unused

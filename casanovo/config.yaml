@@ -16,7 +16,7 @@ isotope_error_range: [0, 1]
 # The minimum length of predicted peptides.
 min_peptide_len: 6
 # Number of spectra in one inference batch.
-predict_batch_size: 1
+predict_batch_size: 256
 # Number of beams used in beam search.
 n_beams: 5
 # Number of PSMs for each spectrum.
@@ -28,7 +28,6 @@ accelerator: "auto"
 # indicate all available devices should be used. If left empty, the appropriate
 # number will be automatically selected for based on the chosen accelerator.
 devices:
-
 ###
 # The following parameters should only be modified if you are training a new
 # Casanovo model from scratch.
@@ -49,7 +48,8 @@ save_top_k: 10
 model_save_folder_path: "/root/attennovo/checkpoint"
 # Model validation and checkpointing frequency in training steps.
 val_check_interval: 5470
-# val_check_interval: 2
+# val_check_interval: 1823
+# val_check_interval: 1
 
 # SPECTRUM PROCESSING OPTIONS
 # Number of the most intense peaks to retain, any remaining peaks are discarded.
@@ -82,13 +82,15 @@ dropout: 0.1
 # Projected up to `dim_model` by default and summed with the peak m/z encoding.
 dim_intensity:
 # Max decoded peptide length.
-max_length: 100
+max_length: 100 #20_000
 # The number of iterations for the linear warm-up of the learning rate.
-warmup_iters: 100_000
+warmup_iters: 100_000 #500_000
+# warmup_iters: 10940
 # The number of iterations for the cosine half period of the learning rate.
-cosine_schedule_period_iters: 600_000
+cosine_schedule_period_iters: 600_000 #600_000
 # Learning rate for weight updates during training.
 learning_rate: 5e-4
+# learning_rate: 2e-5
 # Regularization term for weight updates.
 weight_decay: 1e-5
 # Amount of label smoothing when computing the training loss.
@@ -98,12 +100,17 @@ train_label_smoothing: 0.01
 # Number of spectra in one training batch.
 train_batch_size: 512
 # Max number of training epochs.
-max_epochs: 30
+max_epochs: 50
 # Number of validation steps to run before training begins.
 num_sanity_val_steps: 0
 # Calculate peptide and amino acid precision during training.
 # This is expensive, so we recommend against it.
-calculate_precision: True
+calculate_precision: False
+
+
+dual_training_for_deletion: True
+dual_training_for_insertion: Flase
+no_share_discriminator: True
 
 # AMINO ACID AND MODIFICATION VOCABULARY
 residues:

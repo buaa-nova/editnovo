@@ -1,50 +1,30 @@
-#!/bin/bash 
+#!/usr/bin/env bash
+set -euo pipefail
 
-# List of all MGF directories in the main directory
-mgf_files=(
-    "Apis-mellifera" "Candidatus-endoloripes" "Methanosarcina-mazei" "Saccharomyces-cerevisiae" "Vigna-mungo"
-    "Bacillus-subtilis" "H.-sapiens" "Mus-musculus" "Solanum-lycopersicum"
-)
+# ————— CONFIG —————
+DATA_DIR=/root/data/dda-train-data/nine-species-main-mgf-sample/
+EXCLUDE_SPECIES="H.-sapiens"            # basename without .mgf
+TEST_DIR=/root/data/dda-train-data/nine-species-main-test-sample       # directory with your test .mgf files
+PYTHON_MODULE="casanovo.casanovo"
+# ————————————
 
-
-# Directory containing MGF files
-data_dir="/root/9speciesbenchmark"
-
-# # List of all MGF directories in the main directory
-# mgf_files=(
-#     "Apis-mellifera" "Candidatus-endoloripes" 
-# )
-
-# Specify species to exclude
-exclude_species="H.-sapiens"  # Change this to exclude a different species
-
-# Filter MGF directories to exclude the specified species
+# 1) Gather all .mgf files in DATA_DIR except the excluded species
 train_files=()
-for dir in "${mgf_files[@]}"; do
-    if [[ "$dir" != *"$exclude_species"* ]]; then
-        for file in "$data_dir/$dir"/*; do
-            if [[ -f "$file" ]]; then
-                train_files+=("$file")  # Expand wildcards before storing
-            fi
-        done
-    fi
-done
+while IFS= read -r -d '' mgf; do
+  name=$(basename "$mgf" .mgf)
+  if [[ "$name" != "$EXCLUDE_SPECIES" ]]; then
+    train_files+=("$mgf")
+  fi
+done < <(find "$DATA_DIR" -maxdepth 1 -type f -name '*.mgf' -print0)
+# MODEL_PATH="/root/attennovo/checkpoint/epoch=48-step=80212.ckpt"
+# 2) Build the base command
+cmd=( python -m "$PYTHON_MODULE" train "${train_files[@]}" )
 
-# Construct the training command
-train_command=(
-    "python" "-m" "casanovo.casanovo" "train"
-    "${train_files[@]}"
-)
+# 3) Append each test file with a '-p' flag
+while IFS= read -r -d '' testmgf; do
+  cmd+=(-p "$testmgf")
+done < <(find "$TEST_DIR" -maxdepth 1 -type f -name '*.mgf' -print0)
 
-# Add validation files with -p before each file
-for file in /root/training_data/test/*; do
-    if [[ -f "$file" ]]; then
-        train_command+=("-p" "$file")
-    fi
-done
-
-# Print the command for verification
-echo "Training command: ${train_command[*]}"
-
-# Execute the training command
-"${train_command[@]}"
+# 4) Echo (and run) the command
+echo "Running:" "${cmd[@]}"
+# exec "${cmd[@]}"

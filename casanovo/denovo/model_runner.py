@@ -231,6 +231,8 @@ class ModelRunner:
             weight_decay=self.config.weight_decay,
             out_writer=self.writer,
             calculate_precision=self.config.calculate_precision,
+            dual_training_for_deletion=self.config.dual_training_for_deletion,
+            no_share_discriminator=self.config.no_share_discriminator,
         )
 
         # Reconfigurable non-architecture related parameters for a loaded model.

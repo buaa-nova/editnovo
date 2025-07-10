@@ -127,6 +127,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         max_decoder_iters: int = 1,
         eos_penalty : int = 0,
         max_ratio: float = 0.5,
+        dual_training_for_deletion: bool = False,
+        no_share_discriminator: bool = False,
+        dual_training_for_insertion: bool = False,
         **kwargs: Dict,
     ):
         super().__init__()
@@ -149,6 +152,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             dropout=dropout,
             residues=residues,
             max_charge=max_charge,
+            dual_training_for_deletion=dual_training_for_deletion,
+            no_share_discriminator=no_share_discriminator,
+            dual_training_for_insertion=dual_training_for_insertion,
         )
         self.softmax = torch.nn.Softmax(2)
         self.celoss = torch.nn.CrossEntropyLoss(
@@ -199,7 +205,8 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         self.celoss = torch.nn.CrossEntropyLoss(
             ignore_index=0, label_smoothing=0.01
         )
-
+        self.dual_training_for_deletion = dual_training_for_deletion
+        self.dual_training_for_insertion = dual_training_for_insertion
     def beam_search_forward(
         self, spectra: torch.Tensor, precursors: torch.Tensor
     ) -> List[List[Tuple[float, np.ndarray, str]]]:
@@ -494,6 +501,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             pad_mask = torch.zeros_like(tokens, dtype=torch.bool)
             for pid in ignore_ids:
                 pad_mask |= tokens.eq(pid)
+            pad_mask |= tokens.eq(self.decoder.mask)
             non_ignore = ~pad_mask
             non_pad = tokens.ne(self.decoder.pad)
             
@@ -639,9 +647,6 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             the amino acid scores, and the predicted peptide sequence.
         """
        
-        # initailize
-        for i in range(spectra.size(0)):
-            print(f"i= {i}, n_peaks={torch.count_nonzero(spectra[i]).item()/2}")  # 计算非零峰数量
         memory, memory_key_padding_mask = self.encoder(spectra)
         # Prepare mass and charge
         masses = self.decoder.mass_encoder(precursors[:, None, 0])
@@ -1312,22 +1317,27 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         steps = []
         positional_scores = []
         scores = []
-        # for spectrum_preds in self.forward(batch[0], batch[1]):
-        #     for pred_dict in spectrum_preds:
-        #         peptides_pred.append(pred_dict["sequence"])
-        #         steps.append(pred_dict["steps"])
-        #         scores.append(pred_dict["score"].cpu().detach().numpy())
-        #         positional_scores.append(pred_dict["positional_scores"].cpu().detach().numpy())
-        for spectrum_preds in self.beam_search_forward(batch[0], batch[1]):
-            for score, pos_score, pred_peptide_str in spectrum_preds:
-                peptides_pred.append(pred_peptide_str)
-                steps.append(-1)
-                scores.append(score.cpu().detach().numpy())
-                positional_scores.append(pos_score.cpu().detach().numpy())
+        for spectrum_preds in self.forward(batch[0], batch[1]):
+            for pred_dict in spectrum_preds:
+                
+                peptides_pred.append(pred_dict["sequence"])
+                steps.append(pred_dict["steps"])
+                if pred_dict["score"]:
+                    scores.append(pred_dict["score"].cpu().detach().numpy())
+                    positional_scores.append(pred_dict["positional_scores"].cpu().detach().numpy())
+                else:
+                    scores.append(-100000)
+                    positional_scores.append([-10000])
+        # for spectrum_preds in self.beam_search_forward(batch[0], batch[1]):
+        #     for score, pos_score, pred_peptide_str in spectrum_preds:
+        #         peptides_pred.append(pred_peptide_str)
+        #         steps.append(-1)
+        #         scores.append(score.cpu().detach().numpy())
+        #         positional_scores.append(pos_score.cpu().detach().numpy())
 
 
         
-        logger.info("Peptide_true | Peptide_predict |Steps |  Full_match | Match_count | n_aa1 | n_aa2")
+        # logger.info("Peptide_true | Peptide_predict |Steps |  Full_match | Match_count | n_aa1 | n_aa2")
         aa_precision, _, pep_precision = evaluate.aa_match_metrics(
             *evaluate.aa_match_batch(
                 logger,
@@ -1419,6 +1429,17 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 "train_word_del-loss"
             ].detach().item(),
         }
+        if self.dual_training_for_deletion:
+            metrics["dual-word-del-train"] = self.trainer.callback_metrics[
+                "train_word_del_dual-loss"
+            ].detach().item()
+        if self.dual_training_for_insertion:
+            metrics["dual-mask-ins-train"] = self.trainer.callback_metrics[
+                "train_mask_ins_dual-loss"
+            ].detach().item()
+            metrics["dual-word-ins-train"] = self.trainer.callback_metrics[
+                "train_word_ins_dual-loss"
+            ].detach().item()
         self._history.append(metrics)
         self._log_history()
 
@@ -1434,6 +1455,17 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             "word-ins-valid": callback_metrics["valid_word_ins-loss"].detach().item(),
             "word-del-valid": callback_metrics["valid_word_del-loss"].detach().item(),
         }
+        if self.dual_training_for_deletion:
+            metrics["dual-word-del-valid"] = (
+                callback_metrics["valid_word_del_dual-loss"].detach().item()
+            )
+        if self.dual_training_for_insertion:
+            metrics["dual-mask-ins-valid"] = (
+                callback_metrics["valid_mask_ins_dual-loss"].detach().item()
+            )
+            metrics["dual-word-ins-valid"] = (
+                callback_metrics["valid_word_ins_dual-loss"].detach().item()
+            )
 
         if self.calculate_precision:
             metrics["valid_aa_precision"] = (
@@ -1496,18 +1528,40 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             logger.info(header)
         metrics = self._history[-1]
         if metrics["step"] % self.n_log == 0:
-            msg = "%i\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t"
-            vals = [
-                metrics["step"],
-                metrics.get("train", np.nan),
-                metrics.get("mask-ins-train", np.nan),
-                metrics.get("word-ins-train", np.nan),
-                metrics.get("word-del-train", np.nan),
-                metrics.get("valid", np.nan),
-                metrics.get("mask-ins-valid", np.nan),
-                metrics.get("word-ins-valid", np.nan),
-                metrics.get("word-del-valid", np.nan),
-            ]
+            if self.dual_training_for_insertion:
+                msg = "%i\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t"
+                vals = [
+                    metrics["step"],
+                    metrics.get("train", np.nan),
+                    metrics.get("mask-ins-train", np.nan),
+                    metrics.get("word-ins-train", np.nan),
+                    metrics.get("word-del-train", np.nan),
+                    metrics.get("dual-word-del-train", np.nan),
+                    metrics.get("dual-mask-ins-train", np.nan),
+                    metrics.get("dual-word-ins-train", np.nan),
+                    metrics.get("valid", np.nan),
+                    metrics.get("mask-ins-valid", np.nan),
+                    metrics.get("word-ins-valid", np.nan),
+                    metrics.get("word-del-valid", np.nan),
+                    metrics.get("dual-word-del-valid", np.nan),
+                    metrics.get("dual-mask-ins-valid", np.nan),
+                    metrics.get("dual-word-ins-valid", np.nan),
+                ]
+            else:
+                msg = "%i\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t"
+                vals = [
+                    metrics["step"],
+                    metrics.get("train", np.nan),
+                    metrics.get("mask-ins-train", np.nan),
+                    metrics.get("word-ins-train", np.nan),
+                    metrics.get("word-del-train", np.nan),
+                    metrics.get("dual-word-del-train", np.nan),
+                    metrics.get("valid", np.nan),
+                    metrics.get("mask-ins-valid", np.nan),
+                    metrics.get("word-ins-valid", np.nan),
+                    metrics.get("word-del-valid", np.nan),
+                    metrics.get("dual-word-del-valid", np.nan),
+                ]
 
             if self.calculate_precision:
                 msg += "\t%.6f\t%.6f"
@@ -1523,10 +1577,16 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                     ("loss/train_mask-ins_loss", "mask-ins-train"),
                     ("loss/train_word-ins_loss", "word-ins-train"),
                     ("loss/train_word-del_loss", "word-del-train"),
+                    ("loss/train_word-del_dual_loss", "dual-word-del-train"),
+                    ("loss/dual_mask-ins_loss", "dual-mask-ins-train"),
+                    ("loss/dual_word-ins_loss", "dual-word-ins-train"),
                     ("loss/val_crossentropy_loss", "valid"),
                     ("loss/val_mask-ins_loss", "mask-ins-valid"),
                     ("loss/val_word-ins_loss", "word-ins-valid"),
                     ("loss/val_word-del_loss", "word-del-valid"),
+                    ("loss/val_word-del_dual_loss", "dual-word-del-valid"),
+                    ("loss/dual_mask-ins_loss", "dual-mask-ins-valid"),
+                    ("loss/dual_word-ins_loss", "dual-word-ins-valid"),
                     ("eval/val_pep_precision", "valid_pep_precision"),
                     ("eval/val_aa_precision", "valid_aa_precision"),
                 ]:
