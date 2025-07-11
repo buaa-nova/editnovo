@@ -232,6 +232,7 @@ class ModelRunner:
             out_writer=self.writer,
             calculate_precision=self.config.calculate_precision,
             dual_training_for_deletion=self.config.dual_training_for_deletion,
+            dual_training_for_insertion=self.config.dual_training_for_insertion,
             no_share_discriminator=self.config.no_share_discriminator,
         )
 

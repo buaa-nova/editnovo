@@ -497,7 +497,7 @@ class PeptideDecoder(_PeptideTransformer):
             delete_layer,
             num_layers=n_layers,
         )
-        
+
     def build_decoder_layer(self, embed_dim, n_head, dim_feedforward, dropout_p, no_encoder_attn=False):
         layer = TransformerDecoderLayerBase(embed_dim, n_head, dim_feedforward, dropout_p, no_encoder_attn)
         return layer
@@ -995,6 +995,9 @@ class PeptideDecoder(_PeptideTransformer):
 
         # generate training labels for deletion
         # word_del_targets shape: (batch_size, l)
+        word_predictions.masked_scatter_(
+            ~masked_tgt_masks, tgt_tokens[~masked_tgt_masks]
+        )
         word_del_targets = _get_del_targets(word_predictions, tgt_tokens, self.pad)
         word_del_out, _ = self.forward_word_del(
             normalize=False,
@@ -1124,7 +1127,7 @@ class PeptideDecoder(_PeptideTransformer):
                 prev_output_tokens=full_mask_target,
             )[0]
             pred_tokens_corr = word_ins_out.argmax(-1)
-            pred_tokens_corr.masked_scatter_(target_mask, tgt_tokens)
+            pred_tokens_corr.masked_scatter_(target_mask, tgt_tokens[target_mask])
         return pred_tokens_corr
 
     def inject_noise(self, target_tokens):

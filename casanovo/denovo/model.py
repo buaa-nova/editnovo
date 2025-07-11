@@ -1528,7 +1528,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             logger.info(header)
         metrics = self._history[-1]
         if metrics["step"] % self.n_log == 0:
-            if self.dual_training_for_insertion:
+            if self.dual_training_for_deletion and self.dual_training_for_insertion:
                 msg = "%i\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t"
                 vals = [
                     metrics["step"],
@@ -1544,6 +1544,26 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                     metrics.get("word-ins-valid", np.nan),
                     metrics.get("word-del-valid", np.nan),
                     metrics.get("dual-word-del-valid", np.nan),
+                    metrics.get("dual-mask-ins-valid", np.nan),
+                    metrics.get("dual-word-ins-valid", np.nan),
+                ]
+
+            elif self.dual_training_for_insertion:
+                msg = "%i\t%.6f\t%.6f\t%.6f\t%.6f\t%.6ft%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t"
+                vals = [
+                    metrics["step"],
+                    metrics.get("train", np.nan),
+                    metrics.get("mask-ins-train", np.nan),
+                    metrics.get("word-ins-train", np.nan),
+                    metrics.get("word-del-train", np.nan),
+                    # metrics.get("dual-word-del-train", np.nan),
+                    metrics.get("dual-mask-ins-train", np.nan),
+                    metrics.get("dual-word-ins-train", np.nan),
+                    metrics.get("valid", np.nan),
+                    metrics.get("mask-ins-valid", np.nan),
+                    metrics.get("word-ins-valid", np.nan),
+                    metrics.get("word-del-valid", np.nan),
+                    # metrics.get("dual-word-del-valid", np.nan),
                     metrics.get("dual-mask-ins-valid", np.nan),
                     metrics.get("dual-word-ins-valid", np.nan),
                 ]
