@@ -1605,8 +1605,8 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                     ("loss/val_word-ins_loss", "word-ins-valid"),
                     ("loss/val_word-del_loss", "word-del-valid"),
                     ("loss/val_word-del_dual_loss", "dual-word-del-valid"),
-                    ("loss/dual_mask-ins_loss", "dual-mask-ins-valid"),
-                    ("loss/dual_word-ins_loss", "dual-word-ins-valid"),
+                    ("loss/val_dual_mask-ins_loss", "dual-mask-ins-valid"),
+                    ("loss/val_dual_word-ins_loss", "dual-word-ins-valid"),
                     ("eval/val_pep_precision", "valid_pep_precision"),
                     ("eval/val_aa_precision", "valid_aa_precision"),
                 ]:
