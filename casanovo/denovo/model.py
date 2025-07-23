@@ -130,6 +130,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         dual_training_for_deletion: bool = False,
         no_share_discriminator: bool = False,
         dual_training_for_insertion: bool = False,
+        is_sampling_for_insertion: bool = True,
         **kwargs: Dict,
     ):
         super().__init__()
@@ -468,13 +469,17 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         discard[has_neginf] = True
         # 总行数 = B * S
         total_beams, L1 = tokens.size()
+        # print(f"tokens size: {tokens.size()}")
         _,  L2  = prev_out_token.size()
+        # print(f"prev_out_token size: {prev_out_token.size()}")
         S = beam_size
         # 计算 batch 大小 B
         B = total_beams // S
 
         # 恢复成 [B, S, L]
         toks = tokens.view(B, S, L1)
+        # print(tokens.size())
+        # print(f"prev_out_token size: {prev_out_token.size()}")
         prev = prev_out_token.view(B, S, L2)
         # 2) 在尾部补齐到同样长度 L_max
         L_max = max(L1, L2)
@@ -501,7 +506,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             pad_mask = torch.zeros_like(tokens, dtype=torch.bool)
             for pid in ignore_ids:
                 pad_mask |= tokens.eq(pid)
-            pad_mask |= tokens.eq(self.decoder.mask)
+            pad_mask |= tokens.eq(self.decoder.unk)
             non_ignore = ~pad_mask
             non_pad = tokens.ne(self.decoder.pad)
             
@@ -670,6 +675,13 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             decoder_out = self.decoder.forward_decoder(
                 step, self.encoder, prev_decoder_out, precursors_embedding, memory, memory_key_padding_mask
             )
+
+            # if step == 0:
+            #     decoder_out.output_tokens[0, 1] = self.decoder.unk
+            #     decoder_out.output_tokens[0, 2] = 8
+            #     decoder_out = decoder_out._replace(
+            #         output_tokens=decoder_out.output_tokens,  # [B, 1]
+            #     )
 
             # terminate if there is a loop
             # terminated shape: (bsz, ) out_tokens shape: (bsz, L), out_scores shape: (bsz, L, V)
@@ -1337,7 +1349,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
 
 
         
-        # logger.info("Peptide_true | Peptide_predict |Steps |  Full_match | Match_count | n_aa1 | n_aa2")
+        logger.info("Peptide_true | Peptide_predict |Steps |  Full_match | Match_count | n_aa1 | n_aa2")
         aa_precision, _, pep_precision = evaluate.aa_match_metrics(
             *evaluate.aa_match_batch(
                 logger,

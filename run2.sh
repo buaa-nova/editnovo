@@ -34,7 +34,7 @@ for mgf in "$test_dir"/*.[mM][gG][fF]; do
   train_command+=(-p "$mgf")
 done
 # # 4) 加上 -m model_path
-model_path="/root/attennovo/checkpoint/epoch=6-step=38290.ckpt"
+model_path="/root/attennovo/checkpoint/epoch=16-step=92990.ckpt"
 train_command+=( -m "$model_path" )
 
 # 5) 打印并执行

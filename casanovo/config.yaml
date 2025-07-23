@@ -16,7 +16,7 @@ isotope_error_range: [0, 1]
 # The minimum length of predicted peptides.
 min_peptide_len: 6
 # Number of spectra in one inference batch.
-predict_batch_size: 256
+predict_batch_size: 1
 # Number of beams used in beam search.
 n_beams: 5
 # Number of PSMs for each spectrum.
@@ -40,7 +40,7 @@ random_seed: 454
 # Logging frequency in training steps.
 n_log: 1
 # Tensorboard directory to use for keeping track of training metrics.
-tb_summarywriter: "/root/attennovo-loss/tensorboard/"
+tb_summarywriter: "/root/attennovo-loss/tensorboard/ricebean_v1_part2"
 # Save the top k model checkpoints during training. -1 saves all, and leaving
 # this field empty saves none.
 save_top_k: 10
@@ -48,7 +48,7 @@ save_top_k: 10
 model_save_folder_path: "/root/attennovo/checkpoint"
 # Model validation and checkpointing frequency in training steps.
 # val_check_interval: 5470
-val_check_interval: 1823
+val_check_interval: 2910
 # val_check_interval: 1
 
 # SPECTRUM PROCESSING OPTIONS
@@ -90,12 +90,13 @@ max_length: 100 #20_000
 # cosine_schedule_period_iters: 600_000 #600_000
 # # Learning rate for weight updates during training.
 # learning_rate: 5e-4
-warmup_iters: 9100 #5*1820
+warmup_iters: 100_000 #5*1820
 # warmup_iters: 10940
 # The number of iterations for the cosine half period of the learning rate.
-cosine_schedule_period_iters: 63700 #35*1820, 600_000
+cosine_schedule_period_iters: 600_000 #35*1820, 600_000
 # Learning rate for weight updates during training.
-learning_rate: 5e-4
+learning_rate: 5e-4 #5e-4
+# learning_rate: 5e-5 #2e-5
 # learning_rate: 2e-5
 # Regularization term for weight updates.
 weight_decay: 1e-5
@@ -104,19 +105,21 @@ train_label_smoothing: 0.01
 
 # TRAINING/INFERENCE OPTIONS
 # Number of spectra in one training batch.
-train_batch_size: 512
+train_batch_size: 512 #512
 # Max number of training epochs.
-max_epochs: 30
+max_epochs: 30 #30
 # Number of validation steps to run before training begins.
 num_sanity_val_steps: 0
 # Calculate peptide and amino acid precision during training.
 # This is expensive, so we recommend against it.
-calculate_precision: False
+calculate_precision: True
 
 
 dual_training_for_deletion: False
-dual_training_for_insertion: True
+dual_training_for_insertion: False
 no_share_discriminator: False
+is_sampling_for_insertion: False
+
 
 # AMINO ACID AND MODIFICATION VOCABULARY
 residues:

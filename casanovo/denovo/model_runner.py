@@ -234,6 +234,7 @@ class ModelRunner:
             dual_training_for_deletion=self.config.dual_training_for_deletion,
             dual_training_for_insertion=self.config.dual_training_for_insertion,
             no_share_discriminator=self.config.no_share_discriminator,
+            is_sampling_for_insertion=self.config.is_sampling_for_insertion,
         )
 
         # Reconfigurable non-architecture related parameters for a loaded model.

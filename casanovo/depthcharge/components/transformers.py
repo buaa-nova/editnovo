@@ -423,6 +423,8 @@ class PeptideDecoder(_PeptideTransformer):
         dual_training_for_deletion=False,
         no_share_discriminator=False,
         dual_training_for_insertion=False,
+        is_sampling_for_insertion=False,
+        sampling_insert_prob=0.5,
     ):
         """Initialize a PeptideDecoder"""
         super().__init__(
@@ -472,6 +474,8 @@ class PeptideDecoder(_PeptideTransformer):
         self.dual_training_for_deletion = dual_training_for_deletion
         self.dual_training_for_insertion = dual_training_for_insertion
         self.no_share_discriminator = no_share_discriminator
+        self.is_sampling_insert = is_sampling_for_insertion
+        self.sampling_insert_prob = sampling_insert_prob
         layer = torch.nn.TransformerDecoderLayer(
             d_model=dim_model,
             nhead=n_head,
@@ -943,8 +947,41 @@ class PeptideDecoder(_PeptideTransformer):
             tokens = torch.tensor([[]]).to(self.device)
         # shape: (batch_size, l)
         tgt_tokens = tokens
-        # shape: (batch_size, l - delete)
-        prev_output_tokens = self.inject_noise(tokens)
+        # 1. 根据开关决定是否做 20/80 分流
+        if self.is_sampling_insert:
+            # 随机分流：20% 样本走 self_gen→删除，80% 样本走 inject_noise
+            rand   = torch.rand(tgt_tokens.size(0), device=tokens.device)
+            mask_A = rand < self.sampling_insert_prob  # (B,)
+            mask_B = ~mask_A
+
+            prev_output_tokens = torch.empty_like(tokens)
+
+            # 分支 A：self_gen + 删除
+            if mask_A.any():
+                y0  = self.self_gen(precursors[mask_A], memory[mask_A],
+                                    memory_key_padding_mask[mask_A], tgt_tokens[mask_A])
+                assert y0 is not None
+                del_tgt   = _get_del_targets(y0, tgt_tokens[mask_A], self.pad).bool()
+                out_A, _, _ = _apply_del_words(
+                    y0, None, None,
+                    del_tgt,
+                    self.pad, self.bos, self.eos,
+                )
+                prev_output_tokens[mask_A] = out_A
+
+            # 分支 B：inject_noise
+            if mask_B.any():
+                out_B  = self.inject_noise(tokens[mask_B])
+                # 如果 T_out < T，尾部 pad 到长度 T
+                if out_B.size(1) < prev_output_tokens.size(1):
+                    pad_len = prev_output_tokens.size(1) - out_B.size(1)
+                    # pad 的参数是 (pad_left, pad_right) for last dim
+                    out_B = F.pad(out_B, (self.pad, pad_len), value=self.pad)  # 结果 [n_B, T]
+                prev_output_tokens[mask_B] = out_B
+
+        else:
+            # 关闭 sampling_insert，所有样本都走 inject_noise
+            prev_output_tokens = self.inject_noise(tokens)
         
         # generate training labels for insertion
         # mask_ins_targets shape: (batch_size, l - delete - 1)
