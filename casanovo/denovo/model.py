@@ -90,7 +90,13 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         The number of iterations for the linear warm-up of the learning rate.
     cosine_schedule_period_iters : int
         The number of iterations for the cosine half period of the learning rate.
-    out_writer : Optional[str]
+    constant_lr_iters : int
+        The number of iterations to keep constant learning rate in the constant phase scheduler.
+    final_decay_iters : int
+        The number of iterations for final decay from constant LR to minimum LR.
+    min_lr_factor : float
+        The minimum learning rate factor as a fraction of the base learning rate (default: 0.01).
+    out_writer : Optional[ms_io.MztabWriter]
         The output writer for the prediction results.
     calculate_precision : bool
         Calculate the validation set precision during training.
@@ -122,6 +128,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         train_label_smoothing: float = 0.01,
         warmup_iters: int = 100_000,
         cosine_schedule_period_iters: int = 600_000,
+        constant_lr_iters: int = 20_000,
+        final_decay_iters: int = 40_000,
+        min_lr_factor: float = 0.001,
         out_writer: Optional[ms_io.MztabWriter] = None,
         calculate_precision: bool = False,
         max_decoder_iters: int = 1,
@@ -165,6 +174,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         # Optimizer settings.
         self.warmup_iters = warmup_iters
         self.cosine_schedule_period_iters = cosine_schedule_period_iters
+        self.constant_lr_iters = constant_lr_iters
+        self.final_decay_iters = final_decay_iters
+        self.min_lr_factor = min_lr_factor
         # `kwargs` will contain additional arguments as well as unrecognized
         # arguments, including deprecated ones. Remove the deprecated ones.
         for k in config._config_deprecated:
@@ -881,7 +893,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
     
     #     # —— 0. 早退 —— 
     #     if not terminated.any():
-    #         return terminated, prev_out_token, prev_out_score, 
+    #         return terminated, prev_out_token, prev_out_score
 
     #     # —— 1. 非 padding 掩码 —— 
     #     ignore_ids = set(ignore_ids) if ignore_ids is not None else set()
@@ -1643,24 +1655,33 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         """
         optimizer = torch.optim.Adam(self.parameters(), **self.opt_kwargs)
         # Apply learning rate scheduler per step.
-        lr_scheduler = CosineWarmupScheduler(
-            optimizer, self.warmup_iters, self.cosine_schedule_period_iters
+        lr_scheduler = CosineWarmupConstantScheduler(
+            optimizer, 
+            self.warmup_iters, 
+            self.cosine_schedule_period_iters, 
+            self.constant_lr_iters,
+            self.final_decay_iters,
+            min_lr_factor=self.min_lr_factor
         )
         return [optimizer], {"scheduler": lr_scheduler, "interval": "step"}
 
 
 class CosineWarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
     """
-    Learning rate scheduler with linear warm-up followed by cosine shaped decay.
+    Learning rate scheduler with warmup in first cycle only, followed by cosine decay cycles.
+    First cycle: warmup + cosine decay (full peak LR)
+    Subsequent cycles: cosine decay only (0.1 * peak LR, no warmup)
 
     Parameters
     ----------
     optimizer : torch.optim.Optimizer
         Optimizer object.
     warmup_iters : int
-        The number of iterations for the linear warm-up of the learning rate.
+        The number of iterations for the linear warm-up of the learning rate (only in first cycle).
     cosine_schedule_period_iters : int
-        The number of iterations for the cosine half period of the learning rate.
+        The number of iterations for the cosine decay period in the first cycle.
+    min_lr_factor : float, optional
+        The minimum learning rate factor as a fraction of the base learning rate. Default is 0.01 (1%).
     """
 
     def __init__(
@@ -1668,9 +1689,11 @@ class CosineWarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
         optimizer: torch.optim.Optimizer,
         warmup_iters: int,
         cosine_schedule_period_iters: int,
+        min_lr_factor: float = 0.001,
     ):
         self.warmup_iters = warmup_iters
         self.cosine_schedule_period_iters = cosine_schedule_period_iters
+        self.min_lr_factor = min_lr_factor
         super().__init__(optimizer)
 
     def get_lr(self):
@@ -1678,13 +1701,167 @@ class CosineWarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
         return [base_lr * lr_factor for base_lr in self.base_lrs]
 
     def get_lr_factor(self, epoch):
-        lr_factor = 0.5 * (
-            1 + np.cos(np.pi * epoch / self.cosine_schedule_period_iters)
-        )
-        if epoch <= self.warmup_iters:
-            lr_factor *= epoch / self.warmup_iters
+        """
+        Calculate learning rate factor with multiple cycles:
+        - Cycle 1: warmup + cosine decay (full peak LR)
+        - Cycle 2+: cosine decay only (0.1 * peak LR, no warmup)
+        
+        Note: Only the first cycle has warmup. Subsequent cycles start directly at 0.1 * peak LR.
+        The learning rate will not go below min_lr_factor.
+        """
+        current_epoch = epoch
+        
+        # First cycle: warmup + cosine decay
+        first_cycle_total = self.warmup_iters + self.cosine_schedule_period_iters
+        
+        if current_epoch < first_cycle_total:
+            # We're in the first cycle
+            if current_epoch <= self.warmup_iters:
+                # Warmup phase - only in first cycle
+                peak_lr_factor = 1.0
+                lr_factor = self.min_lr_factor + (peak_lr_factor - self.min_lr_factor) * (current_epoch / self.warmup_iters)
+            else:
+                # Cosine decay phase in first cycle
+                decay_epoch = current_epoch - self.warmup_iters
+                peak_lr_factor = 1.0
+                cosine_factor = 0.5 * (1 + np.cos(np.pi * decay_epoch / self.cosine_schedule_period_iters))
+                lr_factor = self.min_lr_factor + (peak_lr_factor - self.min_lr_factor) * cosine_factor
+            return lr_factor
+        
+        # Subsequent cycles: only cosine decay, no warmup
+        remaining_epoch = current_epoch - first_cycle_total
+        cycle_in_subsequent = remaining_epoch // self.cosine_schedule_period_iters
+        decay_epoch_in_cycle = remaining_epoch % self.cosine_schedule_period_iters
+        
+        # Peak LR is 0.1 of original for all subsequent cycles
+        peak_lr_factor = 0.1
+        
+        # Cosine decay from peak_lr_factor to min_lr_factor
+        cosine_factor = 0.5 * (1 + np.cos(np.pi * decay_epoch_in_cycle / self.cosine_schedule_period_iters))
+        lr_factor = self.min_lr_factor + (peak_lr_factor - self.min_lr_factor) * cosine_factor
+        
         return lr_factor
 
+class CosineWarmupConstantScheduler(torch.optim.lr_scheduler._LRScheduler):
+    """
+    Learning rate scheduler with warmup, cosine decay, constant phase, and final cosine decay.
+    First cycle: warmup + cosine decay + constant LR + final cosine decay to min
+    Subsequent cycles: constant LR + final cosine decay to min
+
+    Parameters
+    ----------
+    optimizer : torch.optim.Optimizer
+        Optimizer object.
+    warmup_iters : int
+        The number of iterations for the linear warm-up of the learning rate (only in first cycle).
+    cosine_schedule_period_iters : int
+        The number of iterations for the cosine decay period in the first cycle.
+    constant_lr_iters : int
+        The number of iterations to keep constant learning rate.
+    final_decay_iters : int
+        The number of iterations for final cosine decay from constant LR to min LR.
+    constant_lr_factor : float, optional
+        The constant learning rate factor as a fraction of the peak learning rate. Default is 0.05 (5%).
+    min_lr_factor : float, optional
+        The minimum learning rate factor as a fraction of the base learning rate. Default is 0.001 (0.1%).
+    subsequent_constant_lr_ratio : float, optional
+        For subsequent cycles, the constant LR duration as a percentage of the first cycle's cosine_schedule_period_iters. 
+        Default is 1.0 (100% of cosine decay period). Set to 2.0 for 200% of cosine decay period, etc.
+        Example: if cosine_schedule_period_iters=100000 and subsequent_constant_lr_ratio=1.5, 
+        then subsequent cycles will have constant LR for 150000 iterations.
+    """
+
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        warmup_iters: int,
+        cosine_schedule_period_iters: int,
+        constant_lr_iters: int,
+        final_decay_iters: int,
+        constant_lr_factor: float = 0.08,
+        min_lr_factor: float = 0.001,
+        subsequent_constant_lr_ratio: float = 0.6,
+    ):
+        self.warmup_iters = warmup_iters
+        self.cosine_schedule_period_iters = cosine_schedule_period_iters
+        self.constant_lr_iters = constant_lr_iters
+        self.final_decay_iters = final_decay_iters
+        self.constant_lr_factor = constant_lr_factor
+        self.min_lr_factor = min_lr_factor
+        self.subsequent_constant_lr_ratio = subsequent_constant_lr_ratio
+        
+        # Calculate the constant LR duration for subsequent cycles
+        self.subsequent_constant_lr_iters = int(cosine_schedule_period_iters * subsequent_constant_lr_ratio)
+        super().__init__(optimizer)
+        print(f"Using CosineWarmupConstantScheduler with warmup_iters={warmup_iters}, "
+              f"cosine_schedule_period_iters={cosine_schedule_period_iters}, constant_lr_iters={constant_lr_iters},"
+              f" final_decay_iters={final_decay_iters}, constant_lr_factor={constant_lr_factor}, min_lr_factor={min_lr_factor}, "
+              f"subsequent_constant_lr_ratio={subsequent_constant_lr_ratio}, subsequent_constant_lr_iters={self.subsequent_constant_lr_iters}")
+
+    def get_lr(self):
+        lr_factor = self.get_lr_factor(epoch=self.last_epoch)
+        return [base_lr * lr_factor for base_lr in self.base_lrs]
+
+    def get_lr_factor(self, epoch):
+        """
+        Calculate learning rate factor with multiple phases:
+        First cycle: warmup → cosine decay → constant LR → final cosine decay to min
+        Subsequent cycles: constant LR → final cosine decay to min
+        """
+        current_epoch = epoch
+        
+        # First cycle: warmup + cosine + constant + final decay
+        first_cycle_total = (self.warmup_iters + self.cosine_schedule_period_iters + 
+                           self.constant_lr_iters + self.final_decay_iters)
+        
+        if current_epoch < first_cycle_total:
+            # We're in the first cycle
+            if current_epoch <= self.warmup_iters:
+                # Phase 1: Warmup phase (only in first cycle)
+                peak_lr_factor = 1.0
+                lr_factor = self.min_lr_factor + (peak_lr_factor - self.min_lr_factor) * (current_epoch / self.warmup_iters)
+                
+            elif current_epoch <= self.warmup_iters + self.cosine_schedule_period_iters:
+                # Phase 2: Cosine decay phase (first cycle only)
+                decay_epoch = current_epoch - self.warmup_iters
+                peak_lr_factor = 1.0
+                # Decay from peak to constant LR level
+                cosine_factor = 0.5 * (1 + np.cos(np.pi * decay_epoch / self.cosine_schedule_period_iters))
+                lr_factor = self.constant_lr_factor + (peak_lr_factor - self.constant_lr_factor) * cosine_factor
+                
+            elif current_epoch <= self.warmup_iters + self.cosine_schedule_period_iters + self.constant_lr_iters:
+                # Phase 3: Constant LR phase
+                lr_factor = self.constant_lr_factor
+                
+            else:
+                # Phase 4: Final decay to minimum
+                final_decay_epoch = current_epoch - (self.warmup_iters + self.cosine_schedule_period_iters + self.constant_lr_iters)
+                # Cosine decay from constant LR to min LR
+                decay_progress = final_decay_epoch / self.final_decay_iters
+                cosine_factor = 0.5 * (1 + np.cos(np.pi * decay_progress))
+                lr_factor = self.min_lr_factor + (self.constant_lr_factor - self.min_lr_factor) * cosine_factor
+                
+            return lr_factor
+        
+        # Subsequent cycles: constant LR + final decay only
+        remaining_epoch = current_epoch - first_cycle_total
+        subsequent_cycle_length = self.subsequent_constant_lr_iters + self.final_decay_iters
+        
+        # Find position within the current subsequent cycle
+        cycle_epoch = remaining_epoch % subsequent_cycle_length
+        
+        if cycle_epoch < self.subsequent_constant_lr_iters:
+            # Constant LR phase (longer duration in subsequent cycles)
+            lr_factor = self.constant_lr_factor
+        else:
+            # Final decay phase
+            final_decay_epoch = cycle_epoch - self.subsequent_constant_lr_iters
+            decay_progress = final_decay_epoch / self.final_decay_iters
+            # Cosine decay from constant LR to min LR
+            cosine_factor = 0.5 * (1 + np.cos(np.pi * decay_progress))
+            lr_factor = self.min_lr_factor + (self.constant_lr_factor - self.min_lr_factor) * cosine_factor
+            
+        return lr_factor
 def _select_top_beams(
         cache_results: Dict[int, List[Tuple[torch.Tensor, torch.Tensor]]],
         beam_size: int,

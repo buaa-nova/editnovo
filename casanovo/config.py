@@ -66,8 +66,11 @@ class Config:
         train_label_smoothing=float,
         warmup_iters=int,
         cosine_schedule_period_iters=int,
+        constant_lr_iters=int,
+        final_decay_iters=int,
         learning_rate=float,
         weight_decay=float,
+        min_lr_factor=float,
         train_batch_size=int,
         predict_batch_size=int,
         n_beams=int,
@@ -80,6 +83,7 @@ class Config:
         calculate_precision=bool,
         accelerator=str,
         devices=int,
+        force_load_from_checkpoint=bool,
     )
 
     def __init__(self, config_file: Optional[str] = None):

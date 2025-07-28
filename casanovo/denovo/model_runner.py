@@ -109,6 +109,7 @@ class ModelRunner:
             self.model,
             self.loaders.train_dataloader(),
             self.loaders.val_dataloader(),
+            ckpt_path=self.model_filename if self.model_filename else None,
         )
 
     def evaluate(self, peak_path: Iterable[str]) -> None:
@@ -275,39 +276,49 @@ class ModelRunner:
             )
             raise FileNotFoundError("Could not find the model weights file")
 
-        # First try loading model details from the weights file, otherwise use
-        # the provided configuration.
-        device = torch.empty(1).device  # Use the default device.
-        try:
-            self.model = Spec2Pep.load_from_checkpoint(
-                self.model_filename, map_location=device, **loaded_model_params
-            )
-            logger.info(f"Loading model from:{self.model_filename}")
-
-            architecture_params = set(model_params.keys()) - set(
-                loaded_model_params.keys()
-            )
-            for param in architecture_params:
-                if model_params[param] != self.model.hparams[param]:
-                    warnings.warn(
-                        f"Mismatching {param} parameter in "
-                        f"model checkpoint ({self.model.hparams[param]}) "
-                        f"vs config file ({model_params[param]}); "
-                        "using the checkpoint."
-                    )
-        except RuntimeError:
-            # This only doesn't work if the weights are from an older version
+        # Check configuration to determine loading method
+        if self.config.force_load_from_checkpoint or not train:
+            # Force load from checkpoint for inference or when explicitly configured
+            # (useful for updating LR and other training params during training)
+            device = torch.empty(1).device  # Use the default device.
             try:
                 self.model = Spec2Pep.load_from_checkpoint(
-                    self.model_filename,
-                    map_location=device,
-                    **model_params,
+                    self.model_filename, map_location=device, **loaded_model_params
                 )
+                if not train:
+                    logger.info(f"Loading model from checkpoint for inference: {self.model_filename}")
+                else:
+                    logger.info(f"Force loading model from checkpoint: {self.model_filename}")
+
+                architecture_params = set(model_params.keys()) - set(
+                    loaded_model_params.keys()
+                )
+                for param in architecture_params:
+                    if model_params[param] != self.model.hparams[param]:
+                        warnings.warn(
+                            f"Mismatching {param} parameter in "
+                            f"model checkpoint ({self.model.hparams[param]}) "
+                            f"vs config file ({model_params[param]}); "
+                            "using the checkpoint."
+                        )
             except RuntimeError:
-                raise RuntimeError(
-                    "Weights file incompatible with the current version of "
-                    "Casanovo."
-                )
+                # This only doesn't work if the weights are from an older version
+                try:
+                    self.model = Spec2Pep.load_from_checkpoint(
+                        self.model_filename,
+                        map_location=device,
+                        **model_params,
+                    )
+                except RuntimeError:
+                    raise RuntimeError(
+                        "Weights file incompatible with the current version of "
+                        "Casanovo."
+                    )
+        else:
+            # Default behavior for training: Create model from scratch and let trainer.fit() handle checkpoint loading
+            # This allows proper learning rate scheduler state restoration
+            self.model = Spec2Pep(**model_params)
+            logger.info(f"Model created from scratch, will load weights via trainer.fit() from: {self.model_filename}")
 
     def initialize_data_module(
         self,
