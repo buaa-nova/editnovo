@@ -72,6 +72,14 @@ class SpectrumIndex:
         self._file_offsets = np.array([0])
         self._file_map = {}
         self._locs = {}
+        # Cache for datasets to improve random access performance
+        # Since most files have a single group, optimize for that case
+        self._metadata_dataset = None
+        self._spectra_dataset = None
+        self._current_group = None
+        # Block cache for handling large unchunked datasets
+        self._metadata_block_cache = {}
+        self._block_size = 10000  # Cache blocks of 10k spectra metadata
 
         # Create the file if it doesn't exist.
         if not self.path.exists() or self.overwrite:
@@ -119,6 +127,12 @@ class SpectrumIndex:
             grp_idx += lin_idx >= offsets[grp_idx]
             row_idx = lin_idx - offsets[grp_idx - 1]
             self._locs[lin_idx] = (grp_idx, row_idx)
+        # grp_idx = 0
+        # for lin_idx in range(self._file_offsets[-1]):
+        #     while lin_idx >= self._file_offsets[grp_idx + 1]:
+        #         grp_idx += 1
+        #     row_idx = lin_idx - self._file_offsets[grp_idx]
+        #     self._locs[lin_idx] = (grp_idx, row_idx)
 
     def _get_parser(self, ms_data_file):
         """Get the parser for the MS data file.
@@ -244,7 +258,7 @@ class SpectrumIndex:
             grp_idx = len(self._file_offsets) - 2
             for row_idx in range(parser.n_spectra):
                 lin_idx = row_idx + self._file_offsets[-2]
-                self._locs[lin_idx] = (grp_idx, row_idx)
+                self._locs[lin_idx] = (grp_idx, row_idx) # 给定一个全局 index，返回它在文件中怎么定位
 
     def get_spectrum(self, idx):
         """Access a mass spectrum.
@@ -264,19 +278,52 @@ class SpectrumIndex:
         if self._handle is None:
             raise RuntimeError("Use the context manager for access.")
 
-        grp = self._handle[str(group_index)]
-        metadata = grp["metadata"]
-        spectra = grp["spectra"]
-        offsets = metadata["offset"][row_index : row_index + 2]
-
-        start_offset = offsets[0]
-        if offsets.shape[0] == 2:
-            stop_offset = offsets[1]
+        # Cache datasets for the current group (optimize for single group case)
+        if self._current_group != group_index:
+            grp = self._handle[str(group_index)]
+            self._metadata_dataset = grp["metadata"]
+            self._spectra_dataset = grp["spectra"]
+            self._current_group = group_index
+        
+        # Use block caching for metadata to reduce random access overhead
+        block_id = row_index // self._block_size
+        if block_id not in self._metadata_block_cache:
+            start_idx = block_id * self._block_size
+            end_idx = min(start_idx + self._block_size, self._metadata_dataset.shape[0])
+            self._metadata_block_cache[block_id] = self._metadata_dataset[start_idx:end_idx]
+        
+        block_metadata = self._metadata_block_cache[block_id]
+        local_row_index = row_index % self._block_size
+        
+        # Handle edge case where block is smaller than block_size
+        if local_row_index >= len(block_metadata):
+            precursor = self._metadata_dataset[row_index]
+            # Get offsets directly for edge case
+            if row_index + 1 < self._metadata_dataset.shape[0]:
+                start_offset = self._metadata_dataset["offset"][row_index]
+                stop_offset = self._metadata_dataset["offset"][row_index + 1]
+            else:
+                start_offset = self._metadata_dataset["offset"][row_index]
+                stop_offset = self._spectra_dataset.shape[0]
         else:
-            stop_offset = spectra.shape[0]
+            # Get the precursor info from cached block
+            precursor = block_metadata[local_row_index]
+            
+            # Get offsets from cached block when possible
+            if local_row_index + 1 < len(block_metadata):
+                start_offset = block_metadata["offset"][local_row_index]
+                stop_offset = block_metadata["offset"][local_row_index + 1]
+            else:
+                # Need to get next offset from main dataset
+                start_offset = precursor["offset"]
+                if row_index + 1 < self._metadata_dataset.shape[0]:
+                    stop_offset = self._metadata_dataset["offset"][row_index + 1]
+                else:
+                    stop_offset = self._spectra_dataset.shape[0]
 
-        spectrum = spectra[start_offset:stop_offset]
-        precursor = metadata[row_index]
+        # Read spectrum data in one operation
+        spectrum = self._spectra_dataset[start_offset:stop_offset]
+        
         out = (
             spectrum["mz_array"],
             spectrum["intensity_array"],
@@ -308,13 +355,19 @@ class SpectrumIndex:
 
         grp = self._handle[str(group_index)]
         ms_data_file = grp.attrs["path"]
-        identifier = grp["metadata"][row_index]["scan_id"]
+        
+        # Use cached metadata for better performance
+        if self._current_group != group_index:
+            self._metadata_dataset = grp["metadata"]
+            self._current_group = group_index
+        
+        identifier = self._metadata_dataset[row_index]["scan_id"]
         prefix = grp.attrs["id_type"]
         return ms_data_file, f"{prefix}={identifier}"
 
     def __len__(self):
         """The number of spectra in the index."""
-        return self._offsets[-1]
+        return self._file_offsets[-1]
 
     def __getitem__(self, idx):
         """Access a mass spectrum.
@@ -341,8 +394,9 @@ class SpectrumIndex:
         self._handle = h5py.File(
             self.path,
             "r",
-            rdcc_nbytes=int(3e8),
-            rdcc_nslots=1024000,
+            rdcc_nbytes=int(1e9),        # 1GB cache for large files  
+            rdcc_nslots=4096000,         # More cache slots
+            rdcc_w0=0.5,                 # Cache eviction policy
         )
         return self
 
@@ -350,6 +404,11 @@ class SpectrumIndex:
         """Close the HDF5 file."""
         self._handle.close()
         self._handle = None
+        # Clear caches when closing the file
+        self._metadata_dataset = None
+        self._spectra_dataset = None
+        self._current_group = None
+        self._metadata_block_cache.clear()
 
     @property
     def ms_files(self):
@@ -398,6 +457,27 @@ class SpectrumIndex:
                 return self._handle.attrs["n_peaks"]
 
         return self._handle.attrs["n_peaks"]
+
+    def _preload_group_data(self, group_indices=None):
+        """Preload metadata and spectra for specified groups.
+        
+        Parameters
+        ----------
+        group_indices : list of int, optional
+            Group indices to preload. If None, preload all groups.
+        """
+        if self._handle is None:
+            raise RuntimeError("Use the context manager for access.")
+            
+        if group_indices is None:
+            group_indices = range(len(self._handle))
+        
+        # For single group case, just load group 0
+        if len(self._handle) == 1:
+            grp = self._handle["0"]
+            self._metadata_dataset = grp["metadata"]
+            self._spectra_dataset = grp["spectra"]
+            self._current_group = 0
 
 
 class AnnotatedSpectrumIndex(SpectrumIndex):

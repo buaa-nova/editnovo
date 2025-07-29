@@ -8,7 +8,7 @@ from typing import List, Optional, Tuple
 import lightning.pytorch as pl
 import numpy as np
 import torch
-from depthcharge.data import AnnotatedSpectrumIndex
+from ..depthcharge.data.hdf5 import AnnotatedSpectrumIndex
 
 from ..data.datasets import AnnotatedSpectrumDataset, SpectrumDataset
 
