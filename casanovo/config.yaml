@@ -140,7 +140,7 @@ no_share_discriminator: False
 is_sampling_for_insertion: False
 
 
-tmp_dir: "/mnt/massivekb"
+tmp_dir: "/mnt/tmp"
 
 # AMINO ACID AND MODIFICATION VOCABULARY
 residues:
