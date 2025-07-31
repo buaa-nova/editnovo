@@ -4,6 +4,8 @@ model."""
 import glob
 import logging
 import os
+import posixpath
+import shutil
 import tempfile
 import uuid
 import warnings
@@ -13,7 +15,7 @@ from typing import Iterable, List, Optional, Union
 import lightning.pytorch as pl
 import numpy as np
 import torch
-from depthcharge.data import AnnotatedSpectrumIndex, SpectrumIndex
+from ..depthcharge.data.hdf5 import SpectrumIndex, AnnotatedSpectrumIndex
 from lightning.pytorch.strategies import DDPStrategy
 from lightning.pytorch.callbacks import ModelCheckpoint
 
@@ -69,7 +71,7 @@ class ModelRunner:
 
     def __enter__(self):
         """Enter the context manager"""
-        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.tmp_dir = tempfile.TemporaryDirectory(dir=self.config.tmp_dir)
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -101,7 +103,29 @@ class ModelRunner:
         self.initialize_model(train=True)
 
         train_index = self._get_index(train_peak_path, True, "training")
+        logger.info("Training index: %s", train_index.path)
+        if self.config.dump_hdf5 and pl.utilities.rank_zero.rank_zero_only.rank == 0:
+            logger.info("train_index:%s", train_index.path)
+            # # 计算目标路径
+            destination_path = posixpath.join(self.config.hdf5_dir, posixpath.basename(train_index.path))
+            try:
+                shutil.copy(train_index.path, destination_path)  # 复制文件
+                logger.info("File copied to: %s", destination_path)
+            except Exception as e:
+                logger.error("Failed to copy file: %s", str(e))
+        
+
         valid_index = self._get_index(valid_peak_path, True, "validation")
+        logger.info("valid_index:%s", valid_index.path)
+        if self.config.dump_hdf5 and pl.utilities.rank_zero.rank_zero_only.rank == 0:
+            # 计算目标路径
+            destination_path = posixpath.join(self.config.hdf5_dir, posixpath.basename(valid_index.path))
+            try:
+                shutil.copy(valid_index.path, destination_path)  # 复制文件
+                logger.info("File copied to: %s", destination_path)
+            except Exception as e:
+                logger.error("Failed to copy file: %s", str(e))
+        
         self.initialize_data_module(train_index, valid_index)
         self.loaders.setup()
 

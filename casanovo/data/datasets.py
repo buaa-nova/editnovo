@@ -2,7 +2,7 @@
 
 from typing import Optional, Tuple
 
-import depthcharge
+from ..depthcharge.data.hdf5 import SpectrumIndex
 import numpy as np
 import spectrum_utils.spectrum as sus
 import torch
@@ -38,7 +38,7 @@ class SpectrumDataset(Dataset):
 
     def __init__(
         self,
-        spectrum_index: depthcharge.data.SpectrumIndex,
+        spectrum_index: SpectrumIndex,
         n_peaks: int = 150,
         min_mz: float = 140.0,
         max_mz: float = 2500.0,
@@ -257,7 +257,7 @@ class SpectrumDataset(Dataset):
         return self.index.n_spectra
 
     @property
-    def index(self) -> depthcharge.data.SpectrumIndex:
+    def index(self) -> SpectrumIndex:
         """The underlying SpectrumIndex."""
         return self._index
 
@@ -301,7 +301,7 @@ class AnnotatedSpectrumDataset(SpectrumDataset):
 
     def __init__(
         self,
-        annotated_spectrum_index: depthcharge.data.SpectrumIndex,
+        annotated_spectrum_index:SpectrumIndex,
         n_peaks: int = 150,
         min_mz: float = 140.0,
         max_mz: float = 2500.0,

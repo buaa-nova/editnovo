@@ -48,8 +48,12 @@ save_top_k: 10
 model_save_folder_path: "/root/attennovo/checkpoint"
 # Model validation and checkpointing frequency in training steps.
 # val_check_interval: 5470
-val_check_interval: 2910
+# val_check_interval: 50_000
+val_check_interval: 25_000
 # val_check_interval: 1
+hdf5_dir: "/root/attennovo/hdf5"
+dump_hdf5: False
+n_workers: 8
 
 # MODEL LOADING OPTIONS
 # Set to true to force loading model from checkpoint file instead of using trainer.fit()
@@ -135,6 +139,8 @@ dual_training_for_insertion: False
 no_share_discriminator: False
 is_sampling_for_insertion: False
 
+
+tmp_dir: "/mnt/massivekb"
 
 # AMINO ACID AND MODIFICATION VOCABULARY
 residues:
