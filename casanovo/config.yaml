@@ -49,7 +49,7 @@ model_save_folder_path: "/root/attennovo/checkpoint"
 # Model validation and checkpointing frequency in training steps.
 # val_check_interval: 5470
 # val_check_interval: 50_000
-val_check_interval: 25_000
+val_check_interval: 2908
 # val_check_interval: 1
 hdf5_dir: "/root/attennovo/hdf5"
 dump_hdf5: False
@@ -58,7 +58,7 @@ n_workers: 8
 # MODEL LOADING OPTIONS
 # Set to true to force loading model from checkpoint file instead of using trainer.fit()
 # This is useful when you want to update learning rate or other training parameters
-force_load_from_checkpoint: false
+force_load_from_checkpoint: true
 
 # SPECTRUM PROCESSING OPTIONS
 # Number of the most intense peaks to retain, any remaining peaks are discarded.

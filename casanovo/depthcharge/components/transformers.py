@@ -439,14 +439,6 @@ class PeptideDecoder(_PeptideTransformer):
         self.mass_encoder = FloatEncoder(dim_model)
 
         self.output_embed_dim = dim_model
-        self.layers = torch.nn.ModuleList([])
-        self.layers.extend(
-            [
-                self.build_decoder_layer(dim_model, n_head, dim_feedforward, dropout,)
-                for _ in range(n_layers)
-            ]
-        )
-        self.num_layers = len(self.layers)
 
         self.final = torch.nn.Linear(dim_model, len(self._amino_acids) + 1)
         self.pad = 0
@@ -1009,6 +1001,13 @@ class PeptideDecoder(_PeptideTransformer):
             encoder_out_mask=memory_key_padding_mask,
             prev_output_tokens=masked_tgt_tokens,
         )
+        _, tgt_att = self.forward_word_ins(
+            normalize=False,
+            precurosors=precursors,
+            encoder_out=memory,
+            encoder_out_mask=memory_key_padding_mask,
+            prev_output_tokens=tgt_tokens,
+        )
         B, T, V = word_ins_out.shape
         # make online prediction
         
@@ -1110,6 +1109,7 @@ class PeptideDecoder(_PeptideTransformer):
                 "out": word_ins_out,
                 "tgt": tgt_tokens,
                 "mask": masked_tgt_masks, # shape: (batch_size, l)
+                "tgt_enc": tgt_att,
                 "ls": 0.01,
                 "nll_loss": True,
             },
@@ -1318,7 +1318,6 @@ class PeptideDecoder(_PeptideTransformer):
         encoder_out_mask=None,
         is_delete=False,
         early_exit=None,
-        layers=None,
         **unused
     ):
         """
@@ -1345,22 +1344,6 @@ class PeptideDecoder(_PeptideTransformer):
         x = self.pos_encoder(tgt)
 
         # B x T x C -> T x B x C
-        # x = x.transpose(0, 1)
-        # attn = None
-        # inner_states = [x]
-        # layers = self.layers if layers is None else layers
-        # early_exit = len(layers) if early_exit is None else early_exit
-        # encoder_out = encoder_out.transpose(0, 1) if encoder_out is not None else None
-        # decoder layers
-        # for _, layer in enumerate(layers[:early_exit]):
-        #     x, attn = layer(
-        #         x,
-        #         encoder_out,
-        #         encoder_out_mask,
-        #         self_attn_mask=None,
-        #         self_attn_padding_mask=tgt_key_padding_mask,
-        #     )
-        #     inner_states.append(x)
         if is_delete and self.no_share_discriminator:
             preds = self.transformer_delete_decoder(
                 tgt=x,
@@ -1394,11 +1377,11 @@ class PeptideDecoder(_PeptideTransformer):
             encoder_out=encoder_out,
             encoder_out_mask=encoder_out_mask,
             early_exit=self.early_exit[2],
-            layers=self.layers,
             **unused
         )
         # decoder_out = self.output_projection(features)
         decoder_out = self.final(features)
+        extra["attn"] = features
         if normalize:
             return F.log_softmax(decoder_out, -1), extra["attn"]
         return decoder_out, extra["attn"]
@@ -1411,7 +1394,6 @@ class PeptideDecoder(_PeptideTransformer):
             encoder_out=encoder_out,
             encoder_out_mask=encoder_out_mask,
             early_exit=self.early_exit[1],
-            layers=self.layers, # use shared layers
             **unused
         )
         features_cat = torch.cat([features[:, :-1, :], features[:, 1:, :]], 2)
@@ -1431,7 +1413,6 @@ class PeptideDecoder(_PeptideTransformer):
             encoder_out_mask=encoder_out_mask,
             is_delete=True,
             early_exit=self.early_exit[0],
-            layers=self.layers,
             **unused
         )
         # decoder_out = F.linear(features, self.embed_word_del.weight)

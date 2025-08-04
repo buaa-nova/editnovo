@@ -36,8 +36,8 @@ python -m casanovo.casanovo train /mnt/hdf5/cfbae77b2a5b4d60b93589eeeaa5abac.hdf
 # train_command+=(-p "$test_path")
 
 # # # 5) 加上已训练好的模型权重
-# model_path="/root/attennovo/checkpoint/epoch=29-step=84390.ckpt"
-# train_command+=( -m "$model_path" )
+model_path="/root/data/attennovo/v1/ricebean/epoch=1-step=29770-v1.ckpt"
+train_command+=( -m "$model_path" )
 
 # # 6) 打印并执行
 echo "Training command:"

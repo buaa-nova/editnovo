@@ -128,12 +128,16 @@ class ModelRunner:
         
         self.initialize_data_module(train_index, valid_index)
         self.loaders.setup()
+        if self.config.force_load_from_checkpoint:
+            ckpt_path = None
+        else:
+            ckpt_path = self.model_filename
 
         self.trainer.fit(
             self.model,
             self.loaders.train_dataloader(),
             self.loaders.val_dataloader(),
-            ckpt_path=self.model_filename if self.model_filename else None,
+            ckpt_path=ckpt_path,
         )
 
     def evaluate(self, peak_path: Iterable[str]) -> None:
@@ -307,7 +311,7 @@ class ModelRunner:
             device = torch.empty(1).device  # Use the default device.
             try:
                 self.model = Spec2Pep.load_from_checkpoint(
-                    self.model_filename, map_location=device, **loaded_model_params
+                    self.model_filename, map_location=device, **loaded_model_params, strict=False
                 )
                 if not train:
                     logger.info(f"Loading model from checkpoint for inference: {self.model_filename}")

@@ -2,3 +2,4 @@
 from .transformers import SpectrumEncoder, PeptideDecoder
 from .feedforward import FeedForward
 from .mixins import ModelMixin
+from .ranker import Ranker

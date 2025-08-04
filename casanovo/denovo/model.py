@@ -16,7 +16,7 @@ import torch
 import numpy as np
 import lightning.pytorch as pl
 from torch.utils.tensorboard import SummaryWriter
-from ..depthcharge.components import ModelMixin, PeptideDecoder, SpectrumEncoder
+from ..depthcharge.components import ModelMixin, PeptideDecoder, SpectrumEncoder, Ranker
 
 from . import evaluate
 from .. import config
@@ -166,6 +166,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             no_share_discriminator=no_share_discriminator,
             dual_training_for_insertion=dual_training_for_insertion,
         )
+        self.ranker = Ranker(dim_model=dim_model, n_head=n_head, dim_feedforward=dim_feedforward, n_layer=3, dropout_p=dropout)
         self.softmax = torch.nn.Softmax(2)
         self.celoss = torch.nn.CrossEntropyLoss(
             ignore_index=0, label_smoothing=train_label_smoothing
@@ -220,6 +221,35 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         )
         self.dual_training_for_deletion = dual_training_for_deletion
         self.dual_training_for_insertion = dual_training_for_insertion
+
+    
+    def freeze_encoder_decoder(self):
+        """
+        Freeze encoder and decoder parameters while keeping ranker trainable.
+        This is useful for fine-tuning only the ranking component.
+        """
+        # Freeze encoder parameters
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+        
+        # Freeze decoder parameters  
+        for param in self.decoder.parameters():
+            param.requires_grad = False
+            
+        # Ensure ranker parameters remain trainable
+        for param in self.ranker.parameters():
+            param.requires_grad = True
+            
+        logger.info("Frozen encoder and decoder parameters. Only ranker is trainable.")
+        
+    def unfreeze_all(self):
+        """
+        Unfreeze all model parameters.
+        """
+        for param in self.parameters():
+            param.requires_grad = True
+        logger.info("Unfrozen all model parameters.")
+
     def beam_search_forward(
         self, spectra: torch.Tensor, precursors: torch.Tensor
     ) -> List[List[Tuple[float, np.ndarray, str]]]:
@@ -1005,9 +1035,6 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             history=None,
         )
 
-        
-
-
 
     def _get_topk_beams(
         self,
@@ -1168,7 +1195,15 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         tokens : torch.Tensor of shape (n_spectra, length)
             The predicted tokens for each spectrum.
         """
-        return self.decoder(sequences, precursors, *self.encoder(spectra))
+        encoder, key_mask = self.encoder(spectra)
+        decoder_result = self.decoder(sequences, precursors, encoder, key_mask)
+        word_ins = decoder_result.get("word_ins", None)
+        target_enc = word_ins.get("tgt_enc", None)
+        rank_result = self.ranker(
+            encoder, target_enc, key_mask
+        )
+        decoder_result["rank"] = {"logits": rank_result}
+        return decoder_result
 
     def training_step(
         self,
@@ -1207,6 +1242,15 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
 
         # loss = self.celoss(selected_logits, selected_targets)
         # losses = [{"name": "word_ins-loss", "loss": loss, "factor": 1.0}]
+        rank = outputs.get("rank", None)
+        del outputs["rank"]
+
+        batch_size = rank["logits"].size(0)
+        labels   = torch.arange(batch_size, device=rank["logits"].device)
+        loss_i2p = F.cross_entropy(rank["logits"],     labels)
+        loss_p2i = F.cross_entropy(rank["logits"].t(), labels)
+        loss_rank = 0.5 * (loss_i2p + loss_p2i)
+
         losses, nll_loss = [], []
         for obj in outputs:
             _losses = self._compute_loss(
@@ -1224,6 +1268,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
 
 
         loss = sum(l["loss"] for l in losses)
+        loss += 0.3 * loss_rank  # rank loss
         nll_loss = sum(l for l in nll_loss) if len(nll_loss) > 0 else loss.new_tensor(0)
 
         # NOTE:
@@ -1256,6 +1301,13 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 on_epoch=True,
                 sync_dist=True,
             )
+        self.log(
+            f"{mode}_rank_loss",
+            loss_rank.detach(),
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
         return loss
         # pred, truth = self._forward_step(*batch)
         # pred = pred[:, :-1, :].reshape(-1, self.decoder.vocab_size + 1)
@@ -1452,6 +1504,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             "word-del-train": self.trainer.callback_metrics[
                 "train_word_del-loss"
             ].detach().item(),
+            "rank-train": self.trainer.callback_metrics[
+                "train_rank_loss"
+            ].detach().item(),
         }
         if self.dual_training_for_deletion:
             metrics["dual-word-del-train"] = self.trainer.callback_metrics[
@@ -1624,6 +1679,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                     ("loss/train_word-del_dual_loss", "dual-word-del-train"),
                     ("loss/dual_mask-ins_loss", "dual-mask-ins-train"),
                     ("loss/dual_word-ins_loss", "dual-word-ins-train"),
+                    ("loss/train_rank_loss", "rank-train"),
                     ("loss/val_crossentropy_loss", "valid"),
                     ("loss/val_mask-ins_loss", "mask-ins-valid"),
                     ("loss/val_word-ins_loss", "word-ins-valid"),
