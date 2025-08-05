@@ -76,6 +76,7 @@ class Ranker(nn.Module):
 
         # 3) compute B×B scaled cosine logits
         scale  = self.logit_scale.exp()
-        logits = scale * (z_spec @ z_pep.t())     # (B, B)
+        scores = (z_spec * z_pep).sum(dim=1) * scale # (B,)
+        preds = torch.sigmoid(scores)
 
-        return logits
+        return preds

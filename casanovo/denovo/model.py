@@ -1198,11 +1198,11 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         encoder, key_mask = self.encoder(spectra)
         decoder_result = self.decoder(sequences, precursors, encoder, key_mask)
         word_ins = decoder_result.get("word_ins", None)
-        target_enc = word_ins.get("tgt_enc", None)
+        target_enc = word_ins.get("word_enc", None)
         rank_result = self.ranker(
             encoder, target_enc, key_mask
         )
-        decoder_result["rank"] = {"logits": rank_result}
+        decoder_result["rank"] = {"logit": rank_result}
         return decoder_result
 
     def training_step(
@@ -1245,12 +1245,6 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         rank = outputs.get("rank", None)
         del outputs["rank"]
 
-        batch_size = rank["logits"].size(0)
-        labels   = torch.arange(batch_size, device=rank["logits"].device)
-        loss_i2p = F.cross_entropy(rank["logits"],     labels)
-        loss_p2i = F.cross_entropy(rank["logits"].t(), labels)
-        loss_rank = 0.5 * (loss_i2p + loss_p2i)
-
         losses, nll_loss = [], []
         for obj in outputs:
             _losses = self._compute_loss(
@@ -1265,6 +1259,17 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             losses += [_losses]
             if outputs[obj].get("nll_loss", False):
                 nll_loss += [_losses.get("nll_loss", 0.0)]
+
+        for l in losses:
+            if l["name"] == "word_ins-loss":
+                loss = l["loss"]
+
+
+        batch_size = rank["logits"].size(0)
+        labels   = torch.arange(batch_size, device=rank["logits"].device)
+        loss_i2p = F.cross_entropy(rank["logits"],     labels)
+        loss_p2i = F.cross_entropy(rank["logits"].t(), labels)
+        loss_rank = 0.5 * (loss_i2p + loss_p2i)
 
 
         loss = sum(l["loss"] for l in losses)

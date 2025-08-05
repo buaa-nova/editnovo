@@ -994,19 +994,12 @@ class PeptideDecoder(_PeptideTransformer):
             prev_output_tokens=prev_output_tokens,
         )
         # word_ins_out shape: (batch_size, l, vocab_size)
-        word_ins_out, _ = self.forward_word_ins(
+        word_ins_out, word_att = self.forward_word_ins(
             normalize=False,
             precurosors=precursors,
             encoder_out=memory,
             encoder_out_mask=memory_key_padding_mask,
             prev_output_tokens=masked_tgt_tokens,
-        )
-        _, tgt_att = self.forward_word_ins(
-            normalize=False,
-            precurosors=precursors,
-            encoder_out=memory,
-            encoder_out_mask=memory_key_padding_mask,
-            prev_output_tokens=tgt_tokens,
         )
         B, T, V = word_ins_out.shape
         # make online prediction
@@ -1109,9 +1102,10 @@ class PeptideDecoder(_PeptideTransformer):
                 "out": word_ins_out,
                 "tgt": tgt_tokens,
                 "mask": masked_tgt_masks, # shape: (batch_size, l)
-                "tgt_enc": tgt_att,
+                "word_enc": word_att,
                 "ls": 0.01,
                 "nll_loss": True,
+                "id": greedy_idx,
             },
             "word_del": {
                 "out": word_del_out,
