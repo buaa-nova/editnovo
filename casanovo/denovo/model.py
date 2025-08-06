@@ -1262,14 +1262,10 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
 
         for l in losses:
             if l["name"] == "word_ins-loss":
-                loss = l["loss"]
-
-
-        batch_size = rank["logits"].size(0)
-        labels   = torch.arange(batch_size, device=rank["logits"].device)
-        loss_i2p = F.cross_entropy(rank["logits"],     labels)
-        loss_p2i = F.cross_entropy(rank["logits"].t(), labels)
-        loss_rank = 0.5 * (loss_i2p + loss_p2i)
+                seq_loss = l["seq_loss"]
+                temp = 0.5
+                sim_tgt = torch.exp(-seq_loss/ temp)
+                loss_rank = F.binary_cross_entropy(rank["logit"], sim_tgt)
 
 
         loss = sum(l["loss"] for l in losses)
@@ -1330,46 +1326,116 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         # return loss
 
 
+    # def _compute_loss(
+    #     self, outputs, targets, masks=None, label_smoothing=0.0, name="loss", factor=1.0, weight=None
+    # ):
+    #     """
+    #     outputs: batch x len x d_model
+    #     targets: batch x len
+    #     masks:   batch x len
+
+    #     policy_logprob: if there is some policy
+    #         depends on the likelihood score as rewards.
+    #     """
+
+    #     def mean_ds(x: torch.Tensor, dim=None) -> torch.Tensor:
+    #         return (
+    #             x.float().mean().type_as(x)
+    #             if dim is None
+    #             else x.float().mean(dim).type_as(x)
+    #         )
+
+    #     if masks is not None:
+    #         outputs, targets = outputs[masks], targets[masks]
+
+    #     if masks is not None and not masks.any():
+    #         nll_loss = torch.tensor(0)
+    #         loss = nll_loss
+    #     else:
+    #         logits = F.log_softmax(outputs, dim=-1)
+
+    #         losses = F.nll_loss(logits, targets.to(logits.device), reduction="none", weight=weight)
+
+    #         nll_loss = mean_ds(losses)
+    #         if label_smoothing > 0:
+    #             loss = (
+    #                 nll_loss * (1 - label_smoothing) - mean_ds(logits) * label_smoothing
+    #             )
+    #         else:
+    #             loss = nll_loss
+
+    #     loss = loss * factor
+    #     return {"name": name, "loss": loss, "nll_loss": nll_loss, "factor": factor}
+
     def _compute_loss(
-        self, outputs, targets, masks=None, label_smoothing=0.0, name="loss", factor=1.0, weight=None
-    ):
+        self,
+        outputs: torch.Tensor,                    # (B, L, V)
+        targets: torch.Tensor,                    # (B, L)
+        masks:   Optional[torch.BoolTensor] = None,  # (B, L), True=valid
+        label_smoothing: float = 0.0,
+        name:    str   = "loss",
+        factor:  float = 1.0,
+        weight:  Optional[torch.Tensor] = None
+    ) -> Dict[str, Any]:
         """
-        outputs: batch x len x d_model
-        targets: batch x len
-        masks:   batch x len
-
-        policy_logprob: if there is some policy
-            depends on the likelihood score as rewards.
+        Compute NLL loss per-token, aggregate to per-sequence and overall.
+        Returns dict with:
+        - 'loss':    overall scalar loss (applies label_smoothing & factor)
+        - 'nll_loss': overall mean NLL across the batch
+        - 'seq_loss': tensor of shape (B,) with per-sequence mean NLL
+        - 'factor':  the factor multiplier
         """
+        B, L, V = outputs.size()
 
-        def mean_ds(x: torch.Tensor, dim=None) -> torch.Tensor:
-            return (
-                x.float().mean().type_as(x)
-                if dim is None
-                else x.float().mean(dim).type_as(x)
-            )
+        # 1) log-probs and flatten for per-token loss
+        log_probs     = F.log_softmax(outputs, dim=-1)       # (B, L, V)
+        log_probs_flat= log_probs.view(-1, V)                # (B*L, V)
+        targets_flat  = targets.view(-1)                     # (B*L,)
 
+        # 2) per-token NLL (no reduction)
+        losses_flat = F.nll_loss(
+            log_probs_flat,
+            targets_flat.to(log_probs_flat.device),
+            reduction="none",
+            weight=weight
+        )                                                    # (B*L,)
+
+        # 3) reshape back to (B, L)
+        losses = losses_flat.view(B, L)                      # (B, L)
+
+        # 4) zero out PAD positions
         if masks is not None:
-            outputs, targets = outputs[masks], targets[masks]
+            losses = losses.masked_fill(~masks, 0.0)     # PAD→0
 
-        if masks is not None and not masks.any():
-            nll_loss = torch.tensor(0)
-            loss = nll_loss
+        # 5) per-sequence NLL: mean over valid tokens
+        if masks is not None:
+            valid_counts = (masks).sum(dim=1).clamp(min=1).float()  # (B,)
+            seq_nll      = losses.sum(dim=1) / valid_counts        # (B,)
         else:
-            logits = F.log_softmax(outputs, dim=-1)
+            seq_nll      = losses.mean(dim=1)                       # (B,)
 
-            losses = F.nll_loss(logits, targets.to(logits.device), reduction="none", weight=weight)
+        # 6) overall NLL is mean over all sequences
+        overall_nll = seq_nll.mean()                         # scalar
 
-            nll_loss = mean_ds(losses)
-            if label_smoothing > 0:
-                loss = (
-                    nll_loss * (1 - label_smoothing) - mean_ds(logits) * label_smoothing
-                )
-            else:
-                loss = nll_loss
+        # 7) apply label-smoothing if needed
+        if label_smoothing > 0:
+            # smoothing term: mean of negative log-probs over all tokens
+            smooth_term = -log_probs.mean()
+            overall_loss = overall_nll * (1 - label_smoothing) + smooth_term * label_smoothing
+        else:
+            overall_loss = overall_nll
 
-        loss = loss * factor
-        return {"name": name, "loss": loss, "nll_loss": nll_loss, "factor": factor}
+        # 8) apply scaling factor
+        overall_loss = overall_loss * factor
+
+        return {
+            "name":     name,
+            "loss":     overall_loss,
+            "nll_loss": overall_nll,
+            "seq_loss": seq_nll,
+            "factor":   factor
+        }
+
     def validation_step(
         self, batch: Tuple[torch.Tensor, torch.Tensor, List[str]], *args
     ) -> torch.Tensor:
