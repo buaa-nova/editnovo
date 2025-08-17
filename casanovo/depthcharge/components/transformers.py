@@ -191,6 +191,7 @@ class _PeptideTransformer(torch.nn.Module):
             dim_model,
             padding_idx=0,
         )
+        self.max_charge = max_charge
         # # 定义一个专门给 mask 预测用的线性层（或 Embedding）：
         # self.mask_predictor = torch.nn.Linear(dim_model, num_classes_mask, bias=True)
 
@@ -925,66 +926,60 @@ class PeptideDecoder(_PeptideTransformer):
 
         """
 
-        # Prepare mass and charge
-        masses = self.mass_encoder(precursors[:, None, 0])
-        charges = self.charge_encoder(precursors[:, 1].int() - 1)
-        precursors = masses + charges[:, None, :]
+        # precursors: [B, 2] = (mass, charge)
+        masses = self.mass_encoder(precursors[:, 0].unsqueeze(1))            # [B,1,C]
+        charge_idx = precursors[:, 1].to(torch.long).add_(-1)                # in-place sub 1
+        charge_idx.clamp_(0, self.max_charge - 1)
+        charges = self.charge_encoder(charge_idx).unsqueeze(1)               # [B,1,C]
+        precursors = masses + charges                                        # [B,1,C]
 
-        # Prepare sequences
-        if sequences is not None:
-            sequences = utils.listify(sequences)
-            tokens = [self.tokenize(s) for s in sequences]
-            tokens = torch.nn.utils.rnn.pad_sequence(tokens, batch_first=True)
+        # ---------- Prepare sequences / tokens ----------
+        if isinstance(sequences, torch.Tensor):
+            tokens = sequences.to(device=precursors.device, dtype=torch.long)
         else:
-            tokens = torch.tensor([[]]).to(self.device)
-        # shape: (batch_size, l)
-        tgt_tokens = tokens
-        # 1. 根据开关决定是否做 20/80 分流
-        if self.is_sampling_insert:
-            # 随机分流：20% 样本走 self_gen→删除，80% 样本走 inject_noise
-            rand   = torch.rand(tgt_tokens.size(0), device=tokens.device)
-            mask_A = rand < self.sampling_insert_prob  # (B,)
-            mask_B = ~mask_A
-
-            prev_output_tokens = torch.empty_like(tokens)
-
-            # 分支 A：self_gen + 删除
-            if mask_A.any():
-                y0  = self.self_gen(precursors[mask_A], memory[mask_A],
-                                    memory_key_padding_mask[mask_A], tgt_tokens[mask_A])
-                assert y0 is not None
-                del_tgt   = _get_del_targets(y0, tgt_tokens[mask_A], self.pad).bool()
-                out_A, _, _ = _apply_del_words(
-                    y0, None, None,
-                    del_tgt,
-                    self.pad, self.bos, self.eos,
+            seqs = utils.listify(sequences) if sequences is not None else []
+            if seqs:
+                toks = [self.tokenize(s) for s in seqs]                      # list[Ti]
+                tokens = torch.nn.utils.rnn.pad_sequence(toks, batch_first=True).to(
+                    device=precursors.device, dtype=torch.long
                 )
-                prev_output_tokens[mask_A] = out_A
+            else:
+                tokens = torch.empty(0, 0, dtype=torch.long, device=precursors.device)
 
-            # 分支 B：inject_noise
-            if mask_B.any():
-                out_B  = self.inject_noise(tokens[mask_B])
-                # 如果 T_out < T，尾部 pad 到长度 T
-                if out_B.size(1) < prev_output_tokens.size(1):
-                    pad_len = prev_output_tokens.size(1) - out_B.size(1)
-                    # pad 的参数是 (pad_left, pad_right) for last dim
-                    out_B = F.pad(out_B, (self.pad, pad_len), value=self.pad)  # 结果 [n_B, T]
-                prev_output_tokens[mask_B] = out_B
+        tgt_tokens = tokens  # [B, T]
 
+        # ---------- Build prev_output_tokens (inject_noise / self_gen split) ----------
+        if tokens.numel() == 0:
+            prev_output_tokens = tokens
         else:
-            # 关闭 sampling_insert，所有样本都走 inject_noise
+            B, T = tokens.shape
+            # default: all go through inject_noise, then override rows in branch A
             prev_output_tokens = self.inject_noise(tokens)
+
+            if self.is_sampling_insert:
+                mask_A = (torch.rand(B, device=tokens.device) < self.sampling_insert_prob)
+                if mask_A.any():
+                    y0 = self.self_gen(precursors[mask_A], memory[mask_A],
+                                        memory_key_padding_mask[mask_A], tgt_tokens[mask_A])
+                    del_tgt = _get_del_targets(y0, tgt_tokens[mask_A], self.pad).bool()
+                    out_A, _, _ = _apply_del_words(
+                        y0, None, None, del_tgt, self.pad, self.bos, self.eos
+                    )                                                          # [nA, TA]
+                    # pad/truncate to T to keep static shapes
+                    TA = out_A.size(1)
+                    if TA < T:
+                        out_A = F.pad(out_A, (0, T - TA), value=self.pad)      # (left=0, right=T-TA)
+                    elif TA > T:
+                        out_A = out_A[:, :T]
+                    prev_output_tokens[mask_A] = out_A
         
-        # generate training labels for insertion
-        # mask_ins_targets shape: (batch_size, l - delete - 1)
-        # masked_tgt_tokens shape: (batch_size, l), masked_tgt_masks shape: (batch_size, l)
+        # ---------- Generate insertion targets ----------
         masked_tgt_masks, masked_tgt_tokens, mask_ins_targets = _get_ins_targets(
             prev_output_tokens, tgt_tokens, self.pad, self.unk
         )
-        mask_ins_targets = mask_ins_targets.clamp(min=0, max=31)  # for safe prediction
-        # loss_class_weights = torch.ones(32, device=mask_ins_targets.device)
-        # loss_class_weights[0] = 2 # if mask_ins_targets is 0, it means no insertion, so we give it a higher weight
+        mask_ins_targets = mask_ins_targets.clamp_(min=0, max=31)             # in-place
         mask_ins_masks = prev_output_tokens[:, 1:].ne(self.pad)
+
         # # mask_ins_out shape: (batch_size, l - delete - 1, 32)
         mask_ins_out, _ = self.forward_mask_ins(
             normalize=False,
@@ -1004,29 +999,22 @@ class PeptideDecoder(_PeptideTransformer):
         B, T, V = word_ins_out.shape
         # make online prediction
         
-        # 1) Compute full softmax probabilities
-        greedy_idx = F.log_softmax(word_ins_out, dim=-1).max(2)[1]
-       
-        if self.is_sampling_delete:    
-            samples = torch.multinomial(
-                F.softmax(word_ins_out, -1).view(-1, word_ins_out.size(-1)), 1).view(
-                    word_ins_out.size(0), -1)
-            # 4) Choose 20% of the batch to “sample”
-            #    mask_batch is True for the 20% of rows we’ll sample
-            mask_batch = torch.rand(B, device=word_ins_out.device) < self.sampling_delete_prob  # (B,)
-            # Expand to (B, T) so we apply the same decision across all positions
-            mask = mask_batch.unsqueeze(1).expand(-1, T)    # (B, T)
+        # ---------- Online prediction ----------
+        # Greedy: argmax on logits (no log_softmax needed)
+        greedy_idx = word_ins_out.argmax(dim=2)
 
-            # 5) Combine: sampled rows use `samples`, others use `greedy_idx`
-            word_predictions = torch.where(mask, samples, greedy_idx)  # (B, T)
+        if self.is_sampling_delete:
+            # Sample directly from logits (avoids materializing softmax)
+            samples = torch.distributions.Categorical(logits=word_ins_out).sample()  # [B, T]
+            mask_batch = (torch.rand(B, device=word_ins_out.device) < self.sampling_delete_prob)
+            word_predictions = torch.where(mask_batch.unsqueeze(1), samples, greedy_idx)
         else:
             word_predictions = greedy_idx
 
-        # generate training labels for deletion
-        # word_del_targets shape: (batch_size, l)
-        word_predictions.masked_scatter_(
-            ~masked_tgt_masks, tgt_tokens[~masked_tgt_masks]
-        )
+        # At non-masked positions, force predictions to gold
+        word_predictions = torch.where(masked_tgt_masks, word_predictions, tgt_tokens)
+
+        # ---------- Deletion supervision ----------
         word_del_targets = _get_del_targets(word_predictions, tgt_tokens, self.pad)
         word_del_out, _ = self.forward_word_del(
             normalize=False,
@@ -1036,59 +1024,6 @@ class PeptideDecoder(_PeptideTransformer):
             prev_output_tokens=word_predictions,
         )
         word_del_masks = word_predictions.ne(self.pad)
-        del_out_dual = None
-        if self.dual_training_for_deletion:
-            
-            y0 = self.self_gen(precursors, memory, memory_key_padding_mask, tgt_tokens)
-            assert y0 is not None
-            del_input = y0
-            word_del_targets_dual = _get_del_targets(del_input, tgt_tokens, self.pad)
-            word_del_out_dual, _ = self.forward_word_del(
-                normalize=False,
-                precurosors=precursors,
-                encoder_out=memory,
-                encoder_out_mask=memory_key_padding_mask,
-                prev_output_tokens=del_input,
-            )
-            word_del_masks_dual = del_input.ne(self.pad)
-            # del_out_dual = {k + '_dual' : v for k,v in del_out_dual.items()}
-        if self.dual_training_for_insertion:
-            y0 = self.self_gen(precursors, memory, memory_key_padding_mask, tgt_tokens)
-            assert y0 is not None
-            word_del_for_y0 = _get_del_targets(y0, tgt_tokens, self.pad)
-            ins_input, _, _ = _apply_del_words(
-                y0,
-                None,
-                None,
-                word_del_for_y0.bool(),
-                self.pad,
-                self.bos,
-                self.eos,
-            )
-            # ins_out_dual = self.forward_ins(encoder_out, ins_input, tgt_tokens)
-            masked_tgt_masks_dual, masked_tgt_tokens_dual, mask_ins_targets_dual = _get_ins_targets(
-                ins_input, tgt_tokens, self.pad, self.unk
-            )
-            mask_ins_targets_dual = mask_ins_targets_dual.clamp(min=0, max=31)  # for safe prediction
-            # loss_class_weights = torch.ones(32, device=mask_ins_targets.device)
-            # loss_class_weights[0] = 2 # if mask_ins_targets is 0, it means no insertion, so we give it a higher weight
-            mask_ins_masks_dual = ins_input[:, 1:].ne(self.pad)
-            # # mask_ins_out shape: (batch_size, l - delete - 1, 32)
-            mask_ins_out_dual, _ = self.forward_mask_ins(
-                normalize=False,
-                precurosors=precursors,
-                encoder_out=memory,
-                encoder_out_mask=memory_key_padding_mask,
-                prev_output_tokens=ins_input,
-            )
-            # word_ins_out shape: (batch_size, l, vocab_size)
-            word_ins_out_dual, _ = self.forward_word_ins(
-                normalize=False,
-                precurosors=precursors,
-                encoder_out=memory,
-                encoder_out_mask=memory_key_padding_mask,
-                prev_output_tokens=masked_tgt_tokens_dual,
-            )
 
         results = {
             "mask_ins": {
@@ -1113,28 +1048,6 @@ class PeptideDecoder(_PeptideTransformer):
                 "mask": word_del_masks,
             },
         }
-
-        if self.dual_training_for_deletion:
-            results["word_del_dual"] = {
-                "out": word_del_out_dual,
-                "tgt": word_del_targets_dual,  # shape: (batch_size, l)
-                "mask": word_del_masks_dual,
-            }
-        if self.dual_training_for_insertion:
-            results["mask_ins_dual"] = {
-                "out": mask_ins_out_dual,
-                "tgt": mask_ins_targets_dual,
-                "mask": mask_ins_masks_dual,  # shape: (batch_size, l - delete - 1)
-                "ls": 0.01,
-                # "weight": loss_class_weights,
-            }
-            results["word_ins_dual"] = {
-                "out": word_ins_out_dual,
-                "tgt": tgt_tokens,
-                "mask": masked_tgt_masks_dual,  # shape: (batch_size, l)
-                "ls": 0.01,
-                "nll_loss": True,
-            }
         return results
 
     def self_gen(self, precursors, encoder_out, encoder_out_mask, tgt_tokens):
@@ -1328,13 +1241,32 @@ class PeptideDecoder(_PeptideTransformer):
         """
         # Feed through model:
         if prev_output_tokens is None:
+            # Only precursor token (no peptide tokens yet)
             tgt = precursors_out
+            tgt_key_padding_mask = torch.zeros(
+                precursors_out.size(0), precursors_out.size(1),
+                dtype=torch.bool, device=precursors_out.device
+            )
         else:
-            # use precursors to replace BOS
-            token_embed = self.aa_encoder(prev_output_tokens)
+            # Reuse aa embeddings if provided (saves 1–2 extra matmuls per step)
+            token_embed = self.aa_encoder(prev_output_tokens)  # [B, T, C]
+
+            # Concatenate precursor at position 0 + peptide tokens from position 1 onward
+            # Shapes: precursors_out [B,1,C], token_embed[:,1:,:] [B,T-1,C]  => tgt [B,T,C]
             tgt = torch.cat([precursors_out, token_embed[:, 1:, :]], dim=1)
 
-        tgt_key_padding_mask = tgt.sum(axis=2) == 0
+            # Build padding mask from tokens, not from float sums.
+            # Pad applies only to the peptide positions. Precursor position is always valid (False).
+            # prev_output_tokens: [B, T]
+            # mask for token positions 1..T-1:
+            pad_token_mask = (prev_output_tokens[:, 1:] == self.pad)  # [B, T-1] bool
+            # prepend a False column for the precursor slot:
+            tgt_key_padding_mask = torch.cat(
+                [torch.zeros(pad_token_mask.size(0), 1, dtype=torch.bool, device=pad_token_mask.device),
+                pad_token_mask],
+                dim=1
+        )
+        # Positional encodings (expects [B, T, C] and returns same)
         x = self.pos_encoder(tgt)
 
         # B x T x C -> T x B x C
@@ -1414,6 +1346,7 @@ class PeptideDecoder(_PeptideTransformer):
         if normalize:
             return F.log_softmax(decoder_out, -1), extra["attn"]
         return decoder_out, extra["attn"]   
+
 def generate_tgt_mask(sz):
     """Generate a square mask for the sequence.
 

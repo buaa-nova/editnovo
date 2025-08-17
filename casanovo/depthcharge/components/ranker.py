@@ -46,13 +46,15 @@ class Ranker(nn.Module):
           pep_enc:  (B, L, d_model)
         returns:    (B, d_model)
         """
-        tgt_key_padding_mask = pep_enc.sum(axis=2) == 0
-        attn_out = self.transformer_decoder(
-            tgt=pep_enc,  # (B, L, d_model)
-            memory=spec_enc,  # (B, T, d_model)
-            memory_key_padding_mask=spec_mask,  # (B, T)
-            tgt_key_padding_mask=tgt_key_padding_mask,  # (B, L)
-        )  # → (B, L, d_model)
+        # tgt_key_padding_mask = pep_enc.sum(axis=2) == 0
+        # attn_out = self.transformer_decoder(
+        #     tgt=pep_enc,  # (B, L, d_model)
+        #     memory=spec_enc,  # (B, T, d_model)
+        #     memory_key_padding_mask=spec_mask,  # (B, T)
+        #     tgt_key_padding_mask=tgt_key_padding_mask,  # (B, L)
+        # )  # → (B, L, d_model)
+
+        attn_out = pep_enc
 
         raw_w = self.weight_proj_pep(attn_out).squeeze(-1)  # (B, L)
         a = torch.softmax(raw_w, dim=1)                 # (B, L)

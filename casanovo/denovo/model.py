@@ -1390,7 +1390,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         # 1) log-probs and flatten for per-token loss
         log_probs     = F.log_softmax(outputs, dim=-1)       # (B, L, V)
         log_probs_flat= log_probs.view(-1, V)                # (B*L, V)
-        targets_flat  = targets.view(-1)                     # (B*L,)
+        targets_flat  = targets.reshape(-1)                     # (B*L,)
 
         # 2) per-token NLL (no reduction)
         losses_flat = F.nll_loss(
@@ -1780,7 +1780,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         Tuple[torch.optim.Optimizer, Dict[str, Any]]
             The initialized Adam optimizer and its learning rate scheduler.
         """
-        optimizer = torch.optim.Adam(self.parameters(), **self.opt_kwargs)
+        optimizer = torch.optim.Adam(self.parameters(), **self.opt_kwargs, fused=True)
         # Apply learning rate scheduler per step.
         lr_scheduler = CosineWarmupConstantScheduler(
             optimizer, 

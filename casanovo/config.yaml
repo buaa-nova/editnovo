@@ -40,10 +40,10 @@ random_seed: 454
 # Logging frequency in training steps.
 n_log: 1
 # Tensorboard directory to use for keeping track of training metrics.
-tb_summarywriter: "/root/attennovo-loss/tensorboard/rice_bean_lr"
+tb_summarywriter: "/root/attennovo-loss/tensorboard/rice_bean_lr_rank_perf"
 # Save the top k model checkpoints during training. -1 saves all, and leaving
 # this field empty saves none.
-save_top_k: 10
+save_top_k: 5
 # Path to saved checkpoints.
 model_save_folder_path: "/root/attennovo/checkpoint"
 # Model validation and checkpointing frequency in training steps.
@@ -124,7 +124,7 @@ train_label_smoothing: 0.01
 
 # TRAINING/INFERENCE OPTIONS
 # Number of spectra in one training batch.
-train_batch_size: 512 #512
+train_batch_size: 1024 #512
 # Max number of training epochs.
 max_epochs: 70 #30
 # Number of validation steps to run before training begins.
