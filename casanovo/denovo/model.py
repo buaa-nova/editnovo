@@ -1197,12 +1197,12 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         """
         encoder, key_mask = self.encoder(spectra)
         decoder_result = self.decoder(sequences, precursors, encoder, key_mask)
-        word_ins = decoder_result.get("word_ins", None)
-        target_enc = word_ins.get("word_enc", None)
-        rank_result = self.ranker(
-            encoder, target_enc, key_mask
-        )
-        decoder_result["rank"] = {"logit": rank_result}
+        # word_ins = decoder_result.get("word_ins", None)
+        # target_enc = word_ins.get("word_enc", None)
+        # rank_result = self.ranker(
+        #     encoder, target_enc, key_mask
+        # )
+        # decoder_result["rank"] = {"logit": rank_result}
         return decoder_result
 
     def training_step(
@@ -1242,8 +1242,8 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
 
         # loss = self.celoss(selected_logits, selected_targets)
         # losses = [{"name": "word_ins-loss", "loss": loss, "factor": 1.0}]
-        rank = outputs.get("rank", None)
-        del outputs["rank"]
+        # rank = outputs.get("rank", None)
+        # del outputs["rank"]
 
         losses, nll_loss = [], []
         for obj in outputs:
@@ -1260,16 +1260,16 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             if outputs[obj].get("nll_loss", False):
                 nll_loss += [_losses.get("nll_loss", 0.0)]
 
-        for l in losses:
-            if l["name"] == "word_ins-loss":
-                seq_loss = l["seq_loss"]
-                temp = 0.5
-                sim_tgt = torch.exp(-seq_loss/ temp)
-                loss_rank = F.binary_cross_entropy(rank["logit"], sim_tgt)
+        # for l in losses:
+        #     if l["name"] == "word_ins-loss":
+        #         seq_loss = l["seq_loss"]
+        #         temp = 0.5
+        #         sim_tgt = torch.exp(-seq_loss/ temp)
+        #         loss_rank = F.binary_cross_entropy(rank["logit"], sim_tgt)
 
 
         loss = sum(l["loss"] for l in losses)
-        loss += 0.3 * loss_rank  # rank loss
+        # loss += 0.3 * loss_rank  # rank loss
         nll_loss = sum(l for l in nll_loss) if len(nll_loss) > 0 else loss.new_tensor(0)
 
         # NOTE:
@@ -1302,13 +1302,13 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 on_epoch=True,
                 sync_dist=True,
             )
-        self.log(
-            f"{mode}_rank_loss",
-            loss_rank.detach(),
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-        )
+        # self.log(
+        #     f"{mode}_rank_loss",
+        #     loss_rank.detach(),
+        #     on_step=False,
+        #     on_epoch=True,
+        #     sync_dist=True,
+        # )
         return loss
         # pred, truth = self._forward_step(*batch)
         # pred = pred[:, :-1, :].reshape(-1, self.decoder.vocab_size + 1)
@@ -1484,7 +1484,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
 
 
         
-        logger.info("Peptide_true | Peptide_predict |Steps |  Full_match | Match_count | n_aa1 | n_aa2")
+        # logger.info("Peptide_true | Peptide_predict |Steps |  Full_match | Match_count | n_aa1 | n_aa2")
         aa_precision, _, pep_precision = evaluate.aa_match_metrics(
             *evaluate.aa_match_batch(
                 logger,
@@ -1575,9 +1575,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             "word-del-train": self.trainer.callback_metrics[
                 "train_word_del-loss"
             ].detach().item(),
-            "rank-train": self.trainer.callback_metrics[
-                "train_rank_loss"
-            ].detach().item(),
+            # "rank-train": self.trainer.callback_metrics[
+            #     "train_rank_loss"
+            # ].detach().item(),
         }
         if self.dual_training_for_deletion:
             metrics["dual-word-del-train"] = self.trainer.callback_metrics[
