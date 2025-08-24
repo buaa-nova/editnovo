@@ -16,9 +16,9 @@ python -m casanovo.casanovo train /dev/shm/massivekb/369c9972a4984395b7c7e89bee0
 #   [[ -f "$mgf" ]] || continue
 #   train_command+=(-p "$mgf")
 # done
-# # # 4) 加上 -m model_path
-# model_path="/root/attennovo/checkpoint/epoch=6-step=38290.ckpt"
-# train_command+=( -m "$model_path" )
+# # 4) 加上 -m model_path
+model_path="/root/attennovo/checkpoint/epoch=9-step=273000.ckpt"
+train_command+=( -m "$model_path" )
 
 # 5) 打印并执行
 echo "Training command:"

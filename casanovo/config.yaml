@@ -16,7 +16,7 @@ isotope_error_range: [0, 1]
 # The minimum length of predicted peptides.
 min_peptide_len: 6
 # Number of spectra in one inference batch.
-predict_batch_size: 256
+predict_batch_size: 512
 # Number of beams used in beam search.
 n_beams: 5
 # Number of PSMs for each spectrum.
@@ -40,7 +40,7 @@ random_seed: 454
 # Logging frequency in training steps.
 n_log: 1
 # Tensorboard directory to use for keeping track of training metrics.
-tb_summarywriter: "/root/attennovo-loss/tensorboard/massive-kb-delete-20-epoch"
+tb_summarywriter: "/root/attennovo-loss/tensorboard/massive-kb-delete-20-epoch-1024-rank"
 # Save the top k model checkpoints during training. -1 saves all, and leaving
 # this field empty saves none.
 save_top_k: 5
@@ -49,7 +49,7 @@ model_save_folder_path: "/root/attennovo/checkpoint"
 # Model validation and checkpointing frequency in training steps.
 # val_check_interval: 5470
 # val_check_interval: 50_000
-val_check_interval: 15_000
+val_check_interval: 7_000
 # val_check_interval: 1
 hdf5_dir: "/root/attennovo/hdf5"
 dump_hdf5: False
@@ -58,7 +58,7 @@ n_workers: 8
 # MODEL LOADING OPTIONS
 # Set to true to force loading model from checkpoint file instead of using trainer.fit()
 # This is useful when you want to update learning rate or other training parameters
-force_load_from_checkpoint: true
+force_load_from_checkpoint: True
 
 # SPECTRUM PROCESSING OPTIONS
 # Number of the most intense peaks to retain, any remaining peaks are discarded.
@@ -101,32 +101,34 @@ max_length: 100 #20_000
 # cosine_schedule_period_iters: 600_000 #600_000
 # # Learning rate for weight updates during training.
 # learning_rate: 5e-4
-warmup_iters: 54_000 #5*1820, 14500
+# warmup_iters: 27_000 #5*1820, 14500
+warmup_iters: 11_000
 # warmup_iters: 100_000 #5*1820
 # warmup_iters: 10940
 # The number of iterations for the cosine half period of the learning rate.
-cosine_schedule_period_iters: 490_000 
+cosine_schedule_period_iters: 250_000 
 # cosine_schedule_period_iters: 600_000 #35*1820, 600_000
 # The number of iterations to keep constant learning rate in the constant phase scheduler.
-constant_lr_iters: 490_000
+constant_lr_iters: 2000
 # The number of iterations for final decay from constant LR to minimum LR.
-final_decay_iters: 10_000
+final_decay_iters: 137_000
 # Learning rate for weight updates during training.
 learning_rate: 5e-4 #5e-4
 # learning_rate: 5e-5 #2e-5
-# learning_rate: 2e-5
+# learning_rate: 2e-
+
 # Regularization term for weight updates.
 weight_decay: 1e-5
 # Minimum learning rate factor as a fraction of the base learning rate.
-min_lr_factor: 3e-5
+min_lr_factor: 6e-5
 # Amount of label smoothing when computing the training loss.
 train_label_smoothing: 0.01
 
 # TRAINING/INFERENCE OPTIONS
 # Number of spectra in one training batch.
-train_batch_size: 512 #512
+train_batch_size: 1024 #512
 # Max number of training epochs.
-max_epochs: 20 #30
+max_epochs: 10 #30
 # Number of validation steps to run before training begins.
 num_sanity_val_steps: 0
 # Calculate peptide and amino acid precision during training.
