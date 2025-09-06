@@ -40,7 +40,7 @@ random_seed: 454
 # Logging frequency in training steps.
 n_log: 1
 # Tensorboard directory to use for keeping track of training metrics.
-tb_summarywriter: "/root/attennovo-loss/tensorboard/massive-kb-delete-20-epoch-1024-rank"
+tb_summarywriter: "/root/attennovo-loss/tensorboard/massive-kb-delete-iteration-snd-layer-12"
 # Save the top k model checkpoints during training. -1 saves all, and leaving
 # this field empty saves none.
 save_top_k: 5
@@ -49,7 +49,8 @@ model_save_folder_path: "/root/attennovo/checkpoint"
 # Model validation and checkpointing frequency in training steps.
 # val_check_interval: 5470
 # val_check_interval: 50_000
-val_check_interval: 7_000
+# val_check_interval: 7_000
+val_check_interval: 3_500
 # val_check_interval: 1
 hdf5_dir: "/root/attennovo/hdf5"
 dump_hdf5: False
@@ -109,13 +110,12 @@ warmup_iters: 11_000
 cosine_schedule_period_iters: 250_000 
 # cosine_schedule_period_iters: 600_000 #35*1820, 600_000
 # The number of iterations to keep constant learning rate in the constant phase scheduler.
-constant_lr_iters: 2000
+constant_lr_iters: 100 # 10_000
 # The number of iterations for final decay from constant LR to minimum LR.
-final_decay_iters: 137_000
+final_decay_iters: 20_000 # 137_000
 # Learning rate for weight updates during training.
 learning_rate: 5e-4 #5e-4
 # learning_rate: 5e-5 #2e-5
-# learning_rate: 2e-
 
 # Regularization term for weight updates.
 weight_decay: 1e-5
@@ -128,18 +128,17 @@ train_label_smoothing: 0.01
 # Number of spectra in one training batch.
 train_batch_size: 1024 #512
 # Max number of training epochs.
-max_epochs: 10 #30
+max_epochs: 11 # 15 #30
 # Number of validation steps to run before training begins.
 num_sanity_val_steps: 0
 # Calculate peptide and amino acid precision during training.
 # This is expensive, so we recommend against it.
 calculate_precision: False
 
-
 dual_training_for_deletion: False
 dual_training_for_insertion: False
 no_share_discriminator: False
-is_sampling_for_insertion: False
+sampling_model_gen: 0.6
 
 
 tmp_dir: "/mnt/tmp"

@@ -256,6 +256,8 @@ class ModelRunner:
             train_label_smoothing=self.config.train_label_smoothing,
             warmup_iters=self.config.warmup_iters,
             cosine_schedule_period_iters=self.config.cosine_schedule_period_iters,
+            constant_lr_iters=self.config.constant_lr_iters,
+            final_decay_iters=self.config.final_decay_iters,
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
             out_writer=self.writer,
@@ -263,7 +265,7 @@ class ModelRunner:
             dual_training_for_deletion=self.config.dual_training_for_deletion,
             dual_training_for_insertion=self.config.dual_training_for_insertion,
             no_share_discriminator=self.config.no_share_discriminator,
-            is_sampling_for_insertion=self.config.is_sampling_for_insertion,
+            sampling_model_gen=self.config.sampling_model_gen,
         )
 
         # Reconfigurable non-architecture related parameters for a loaded model.
@@ -272,6 +274,7 @@ class ModelRunner:
             precursor_mass_tol=self.config.precursor_mass_tol,
             isotope_error_range=self.config.isotope_error_range,
             n_beams=self.config.n_beams,
+            n_layers=self.config.n_layers,
             min_peptide_len=self.config.min_peptide_len,
             top_match=self.config.top_match,
             n_log=self.config.n_log,
@@ -279,11 +282,14 @@ class ModelRunner:
             train_label_smoothing=self.config.train_label_smoothing,
             warmup_iters=self.config.warmup_iters,
             cosine_schedule_period_iters=self.config.cosine_schedule_period_iters,
+            constant_lr_iters=self.config.constant_lr_iters,
+            final_decay_iters=self.config.final_decay_iters,
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
             out_writer=self.writer,
             calculate_precision=self.config.calculate_precision,
             max_decoder_iters=self.config.max_decoder_iters,
+            sampling_model_gen=self.config.sampling_model_gen,
         )
 
         if self.model_filename is None:

@@ -139,7 +139,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         dual_training_for_deletion: bool = False,
         no_share_discriminator: bool = False,
         dual_training_for_insertion: bool = False,
-        is_sampling_for_insertion: bool = True,
+        sampling_model_gen: float = 0.3,
         **kwargs: Dict,
     ):
         super().__init__()
@@ -165,6 +165,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             dual_training_for_deletion=dual_training_for_deletion,
             no_share_discriminator=no_share_discriminator,
             dual_training_for_insertion=dual_training_for_insertion,
+            sampling_model_gen=sampling_model_gen,
         )
         self.ranker = Ranker(dim_model=dim_model, n_head=n_head, dim_feedforward=dim_feedforward, n_layer=3, dropout_p=dropout)
         self.softmax = torch.nn.Softmax(2)

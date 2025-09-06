@@ -108,9 +108,15 @@ def _get_ins_targets(in_tokens, out_tokens, padding_idx, unk_idx):
         )
         masked_tgt_masks = masked_tgt_masks.bool() & out_masks
         # mask_ins_targets shape=(B, l_in - 1)
-        mask_ins_targets = mask_ins_targets.type_as(in_tokens)[
-            :, 1 : in_masks.size(1)
-        ].masked_fill_(~in_masks[:, 1:], 0)
+       
+        # 先做 dtype 转换和切片
+        mask_ins_targets = mask_ins_targets.type_as(in_tokens)[:, 1 : in_masks.size(1)]
+
+        # 再做 mask 填充
+        mask_ins_targets = mask_ins_targets.masked_fill_(~in_masks[:, 1:], 0)
+        # mask_ins_targets = mask_ins_targets.type_as(in_tokens)[
+        #     :, 1 : in_masks.size(1)
+        # ].masked_fill_(~in_masks[:, 1:], 0)
         masked_tgt_tokens = out_tokens.masked_fill(masked_tgt_masks, unk_idx)
         return masked_tgt_masks, masked_tgt_tokens, mask_ins_targets
 
@@ -338,6 +344,14 @@ def _skip_encoder_out(encoder, precursors, memory, memory_key_padding_mask, mask
         return memory, memory_key_padding_mask
     else:
         return encoder.reorder_encoder_out(
+            precursors, memory, memory_key_padding_mask, mask.nonzero(as_tuple=False).squeeze()
+        )
+    
+def _skip_encoder_out_with_func(func, precursors, memory, memory_key_padding_mask, mask):
+    if not mask.any():
+        return memory, memory_key_padding_mask
+    else:
+        return func(
             precursors, memory, memory_key_padding_mask, mask.nonzero(as_tuple=False).squeeze()
         )
 
