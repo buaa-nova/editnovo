@@ -27,6 +27,14 @@ from ..denovo.model import Spec2Pep
 
 logger = logging.getLogger("casanovo")
 
+# Enable TensorFloat-32 (TF32) on supported hardware (Ampere+ GPUs).
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
+# Set float32 matrix multiplication precision to "medium" for a good balance
+torch.set_float32_matmul_precision("medium")
+
+
 
 class ModelRunner:
     """A class to run Casanovo models.

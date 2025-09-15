@@ -140,6 +140,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         no_share_discriminator: bool = False,
         dual_training_for_insertion: bool = False,
         sampling_model_gen: float = 0.3,
+        glc_prob: float = 0.5,
         **kwargs: Dict,
     ):
         super().__init__()
@@ -1197,7 +1198,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             The predicted tokens for each spectrum.
         """
         encoder, key_mask = self.encoder(spectra)
-        decoder_result = self.decoder(sequences, precursors, encoder, key_mask)
+        step = self.trainer.global_step
+        prob = 0.5 - 0.5 * (step / 287000)
+        decoder_result = self.decoder(sequences, precursors, encoder, key_mask, prob=prob)
         word_ins = decoder_result.get("word_ins", None)
         target_enc = word_ins.get("word_enc", None)
         rank_result = self.ranker(
@@ -1465,23 +1468,23 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         steps = []
         positional_scores = []
         scores = []
-        for spectrum_preds in self.forward(batch[0], batch[1]):
-            for pred_dict in spectrum_preds:
+        # for spectrum_preds in self.forward(batch[0], batch[1]):
+        #     for pred_dict in spectrum_preds:
                 
-                peptides_pred.append(pred_dict["sequence"])
-                steps.append(pred_dict["steps"])
-                if pred_dict["score"]:
-                    scores.append(pred_dict["score"].cpu().detach().numpy())
-                    positional_scores.append(pred_dict["positional_scores"].cpu().detach().numpy())
-                else:
-                    scores.append(-100000)
-                    positional_scores.append([-10000])
-        # for spectrum_preds in self.beam_search_forward(batch[0], batch[1]):
-        #     for score, pos_score, pred_peptide_str in spectrum_preds:
-        #         peptides_pred.append(pred_peptide_str)
-        #         steps.append(-1)
-        #         scores.append(score.cpu().detach().numpy())
-        #         positional_scores.append(pos_score.cpu().detach().numpy())
+        #         peptides_pred.append(pred_dict["sequence"])
+        #         steps.append(pred_dict["steps"])
+        #         if pred_dict["score"]:
+        #             scores.append(pred_dict["score"].cpu().detach().numpy())
+        #             positional_scores.append(pred_dict["positional_scores"].cpu().detach().numpy())
+        #         else:
+        #             scores.append(-100000)
+        #             positional_scores.append([-10000])
+        for spectrum_preds in self.beam_search_forward(batch[0], batch[1]):
+            for score, pos_score, pred_peptide_str in spectrum_preds:
+                peptides_pred.append(pred_peptide_str)
+                steps.append(-1)
+                scores.append(score.cpu().detach().numpy())
+                positional_scores.append(pos_score.cpu().detach().numpy())
 
 
         

@@ -40,7 +40,7 @@ random_seed: 454
 # Logging frequency in training steps.
 n_log: 1
 # Tensorboard directory to use for keeping track of training metrics.
-tb_summarywriter: "/root/attennovo-loss/tensorboard/massive-kb-delete-iteration-snd-layer-12"
+tb_summarywriter: "/root/attennovo-loss/tensorboard/massive-kb-delete-iteration-fourth"
 # Save the top k model checkpoints during training. -1 saves all, and leaving
 # this field empty saves none.
 save_top_k: 5
@@ -114,7 +114,7 @@ constant_lr_iters: 100 # 10_000
 # The number of iterations for final decay from constant LR to minimum LR.
 final_decay_iters: 20_000 # 137_000
 # Learning rate for weight updates during training.
-learning_rate: 5e-4 #5e-4
+learning_rate: 3e-4 #5e-4
 # learning_rate: 5e-5 #2e-5
 
 # Regularization term for weight updates.

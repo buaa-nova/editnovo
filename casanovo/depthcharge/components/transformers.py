@@ -898,7 +898,7 @@ class PeptideDecoder(_PeptideTransformer):
         new_scores = new_scores.view(B * beam_size, T)  # [B*S, T]
         return new_tokens, new_scores
 
-    def forward(self, sequences, precursors, memory, memory_key_padding_mask):
+    def forward(self, sequences, precursors, memory, memory_key_padding_mask, prob=0.5):
         """Predict the next amino acid for a collection of sequences.
 
         Parameters
@@ -955,7 +955,7 @@ class PeptideDecoder(_PeptideTransformer):
         else:
             gen_from_scratch = False
             # randomly select between self_gen and inject_noise
-            if self.training and random.random() < self.sampling_model_gen:
+            if random.random() < self.sampling_model_gen or self.training is False:
                 gen_from_scratch = True
                 prev_output_tokens = self.gen_from_scratch(precursors, memory, memory_key_padding_mask)
             else:
@@ -1018,20 +1018,64 @@ class PeptideDecoder(_PeptideTransformer):
 
             out[rows[mask], pos[mask]] = word_predictions[mask]
 
-            # 找到每行最后一个非 pad 的位置
-            # (~is_pad).cumsum(1) > 0 可以标记是否已经出现过有效 token
-            # 上面那行有点绕，推荐更直观的写法：
-            valid_lens = (out != self.pad).int().sum(dim=1)  # 每行非 pad 元素个数
+            keep_any = (out != self.pad).any(dim=0)                 # [T] 哪些列存在非 pad
+            prefix_keep = keep_any.flip(0).cumsum(0).flip(0) > 0    # [T] 前缀保留掩码
+            idx = prefix_keep.nonzero().squeeze(1)                  # [T_keep] 需要保留的列索引
+            out = out.index_select(1, idx).contiguous()
 
-            # 取所有样本里的最大真实长度
-            max_len = valid_lens.max().item()
-
-            # 裁剪掉多余的 pad 列
-            out = out[:, :max_len]
             return word_del_out, word_del_masks, word_del_targets, out
+
+        def glc_fill(input_tokens, tgt_tokens, p):
+            # calcuate distance
+            masked_tgt_masks, masked_tgt_tokens, mask_ins_targets = _get_ins_targets(
+                input_tokens, tgt_tokens, self.pad, self.unk
+            )
+            device = masked_tgt_tokens.device
+            B, T = masked_tgt_tokens.shape
+
+            # Masked positions; prefer provided mask, otherwise infer from unk
+            m = masked_tgt_masks.bool() if masked_tgt_masks is not None else (masked_tgt_tokens == self.unk)
+
+            # Do not refill with PAD/BOS/EOS even if present in tgt
+            valid = m & (tgt_tokens != self.pad) & (tgt_tokens != self.bos) & (tgt_tokens != self.eos)
+
+            # Count per-sample valid masked positions and compute how many to refill
+            masked_counts = valid.sum(dim=1)                                # (B,)
+            refill_counts = (masked_counts.float() * float(p)).floor().long()  # (B,)
+
+            # Random scores for selection; invalid positions get +inf so they sort to the end
+            scores = torch.rand(B, T, device=device)
+            scores = scores.masked_fill(~valid, float('inf'))
+
+            # Per-row ranks (0 = smallest random score among valid positions)
+            order = scores.argsort(dim=1)          # (B,T): indices sorted by score
+            ranks = order.argsort(dim=1)           # (B,T): rank of each position in its row
+
+            # Select positions with rank < refill_counts (broadcasted per row)
+            select = ranks < refill_counts.unsqueeze(1)   # (B,T) boolean
+
+            # Write gold tokens into the selected masked positions
+            out = masked_tgt_tokens.clone()
+            out[select] = tgt_tokens[select]
+
+            # remove the tokens that is not filled
+            remove = m & ~select
+            keep = ~remove
+
+            idx = torch.argsort((~keep).long(), dim=1, stable=True)
+            out = torch.gather(out, 1, idx)
+            keep_counts = keep.sum(dim=1)                      # (B,)
+            arange = torch.arange(T, device=device).unsqueeze(0)
+            tail = arange >= keep_counts.unsqueeze(1)
+            out = out.masked_fill(tail, self.pad)
+
+            return out
+            
 
         if gen_from_scratch:
             word_del_out, word_del_masks, word_del_targets, out = learn_delete(prev_output_tokens, tgt_tokens)
+            if self.training:
+                out = glc_fill(out, tgt_tokens, p=prob)
             prediction, word_ins_out, mask_ins_out, mask_ins_targets, mask_ins_masks, masked_tgt_masks, word_att = learn_insert(out)
         else:
             prediction, word_ins_out, mask_ins_out, mask_ins_targets, mask_ins_masks, masked_tgt_masks, word_att = learn_insert(prev_output_tokens)
@@ -1175,6 +1219,8 @@ class PeptideDecoder(_PeptideTransformer):
                     * target_score.new_zeros(target_score.size(0), 1).uniform_()
                 ).long()
             )
+            if max_ratio < 0.0:
+                target_cutoff = 2
             target_cutoff = target_score.sort(1)[1] >= target_cutoff
 
             prev_target_tokens = (
@@ -1225,9 +1271,9 @@ class PeptideDecoder(_PeptideTransformer):
                 mask_positions[i, selected] = True
             return prev, mask_positions
 
-        return _random_delete(target_tokens, 0.0)
+        return _random_delete(target_tokens, -1.0)
     
-    def gen_from_scratch(self, precursors, encoder_out, encoder_out_mask):
+    def gen_from_scratch(self, precursors, encoder_out, encoder_out_mask, tgt_tokens=None):
         """
         Use model to generate a sequence from scratch, starting from only the <BOS><EOS>.
         """
@@ -1353,7 +1399,6 @@ class PeptideDecoder(_PeptideTransformer):
 
         # return x, {"attn": attn, "inner_states": inner_states}
         return preds, {"attn": None, "inner_states": None}
-
 
     def forward_word_ins(self, normalize, precurosors, encoder_out_mask,
                          encoder_out, prev_output_tokens, **unused):
