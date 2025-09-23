@@ -500,133 +500,158 @@ class PeptideDecoder(_PeptideTransformer):
         layer = TransformerDecoderLayerBase(embed_dim, n_head, dim_feedforward, dropout_p, no_encoder_attn)
         return layer
     
+    def forward_decoder(
+        self,
+        step: int,
+        encoder,  # 未使用，仅保留签名兼容
+        decoder_out,
+        precursors: torch.Tensor,
+        memory: torch.Tensor,
+        memory_key_padding_mask: torch.Tensor,
+        eos_penalty: float = 0.0,
+        early_exit: bool = False,
+    ):
+        """
+        delete words, insert masks, insert words
+        """
+        pad, bos, eos, unk = self.pad, self.bos, self.eos, self.unk
 
-    def forward_decoder(self, step, encoder, decoder_out, precursors, memory, memory_key_padding_mask, eos_penalty: float = 0,
-                        early_exit: bool = False):
-        output_tokens = decoder_out.output_tokens
-        output_scores = decoder_out.output_scores
-        bsz = output_tokens.size(0)
-        
+        output_tokens = decoder_out.output_tokens          # [B, T]
+        output_scores = decoder_out.output_scores          # [B, T]
+        B = output_tokens.size(0)
+
         if self.max_ratio is None:
-            max_lens = output_tokens.new_full((bsz,), 40, dtype=torch.long)
+            max_lens = output_tokens.new_full((B,), 40, dtype=torch.long)
         else:
             src_lens = (~memory_key_padding_mask).sum(dim=1)
             max_lens = (src_lens * self.max_ratio).clamp(min=10).long()
 
         # delete words
         # do not delete tokens if it is <s> </s>
-        can_del_word = output_tokens.ne(self.pad).sum(1) > 2
-        if can_del_word.sum() != 0:  # we cannot delete, skip
-            precursors_tmp, memory_tmp, memory_key_padding_mask_tmp=_skip_encoder_out_with_func(SpectrumEncoder.reorder_encoder_out,
-                                            precursors, memory, memory_key_padding_mask, can_del_word)
-      
+        can_del_word = output_tokens.ne(pad).sum(1) > 2
+        if can_del_word.any():
+            idx = can_del_word.nonzero(as_tuple=False).squeeze(1)            # [N]
+            # 子批 encoder 视图（单次 index_select）
+            prec_i   = precursors.index_select(0, idx)
+            mem_i    = memory.index_select(0, idx)
+            mem_m_i  = memory_key_padding_mask.index_select(0, idx)
+            tok_i    = output_tokens.index_select(0, idx)
+            scr_i    = output_scores.index_select(0, idx)
+
+            # [N, T, 2]
             word_del_score, _ = self.forward_word_del(
                 normalize=True,
-                precurosors=precursors_tmp,
-                encoder_out=memory_tmp,
-                encoder_out_mask=memory_key_padding_mask_tmp,
-                prev_output_tokens=_skip(output_tokens, can_del_word), # skip the samples that cannot delete
-                )
-            
-            word_del_pred = word_del_score.max(-1)[1].bool()
-            before_output_tokens = output_tokens[can_del_word].clone()
-            _tokens, _scores, _attn = _apply_del_words(
-                output_tokens[can_del_word],
-                output_scores[can_del_word],
-                None,  # del attn
-                word_del_pred,
-                self.pad,
-                self.bos,
-                self.eos,
+                precurosors=prec_i,
+                encoder_out=mem_i,
+                encoder_out_mask=mem_m_i,
+                prev_output_tokens=tok_i,
             )
-            output_tokens = _fill(output_tokens, can_del_word, _tokens, self.pad)
+            # [N, T] True if delete
+            word_del_pred = word_del_score.argmax(dim=-1).to(torch.bool)
+
+            # apply deletion
+            _tokens, _scores, _ = _apply_del_words(
+                tok_i, scr_i, None, word_del_pred, pad, bos, eos
+            )
+            # use can_del_word mask to fill back
+            output_tokens = _fill(output_tokens, can_del_word, _tokens, pad)
             output_scores = _fill(output_scores, can_del_word, _scores, 0)
-            # print(f"step: {step}, word_del_pred: {word_del_pred}, before tokens:{before_output_tokens}, output_tokens: {_tokens}")
-            
 
         # insert placeholders
-        can_ins_mask = output_tokens.ne(self.pad).sum(1) < max_lens
-        if can_ins_mask.sum() != 0:
-            precursors_tmp, memory_tmp, memory_key_padding_mask_tmp=_skip_encoder_out_with_func(SpectrumEncoder.reorder_encoder_out,
-                                            precursors, memory, memory_key_padding_mask, can_ins_mask)
+        cur_lens = output_tokens.ne(pad).sum(1)                     # [B]
+        can_ins_mask = cur_lens < max_lens
+        if can_ins_mask.any():
+            idx = can_ins_mask.nonzero(as_tuple=False).squeeze(1)
+            prec_i   = precursors.index_select(0, idx)
+            mem_i    = memory.index_select(0, idx)
+            mem_m_i  = memory_key_padding_mask.index_select(0, idx)
+            tok_i    = output_tokens.index_select(0, idx)
+            scr_i    = output_scores.index_select(0, idx)
+
+            # [N, T-1, 32]
             mask_ins_score, _ = self.forward_mask_ins(
                 normalize=True,
-                precurosors=precursors_tmp,
-                encoder_out=memory_tmp,
-                encoder_out_mask=memory_key_padding_mask_tmp,
-                prev_output_tokens=_skip(output_tokens, can_ins_mask)
-            )
-            if eos_penalty > 0.0:
-                mask_ins_score[:, :, 0] = mask_ins_score[:, :, 0] - eos_penalty
-            mask_ins_pred = mask_ins_score.max(-1)[1]
-            # clip the predicted insertion tokens to the maximum length
-            mask_ins_pred = torch.min(
-                mask_ins_pred, max_lens[can_ins_mask, None].expand_as(mask_ins_pred)
+                precurosors=prec_i,
+                encoder_out=mem_i,
+                encoder_out_mask=mem_m_i,
+                prev_output_tokens=tok_i,
             )
 
+            # 最优占位数：[N, T-1]
+            mask_ins_pred = mask_ins_score.argmax(dim=-1)
+            # clip：每条样本不超过 max_lens
+            # 注意 mask_ins 是在 “间隙” 上预测，长度与 tok_i 对齐方式与 _apply_ins_masks 保持一致即可
+            max_lens_i = max_lens.index_select(0, idx).unsqueeze(1).expand_as(mask_ins_pred)
+            mask_ins_pred = torch.minimum(mask_ins_pred, max_lens_i)
+
             _tokens, _scores = _apply_ins_masks(
-                output_tokens[can_ins_mask],
-                output_scores[can_ins_mask],
-                mask_ins_pred,
-                self.pad,
-                self.unk,
-                self.eos,
+                tok_i, scr_i, mask_ins_pred, pad, unk, eos
             )
-            output_tokens = _fill(output_tokens, can_ins_mask, _tokens, self.pad)
+            output_tokens = _fill(output_tokens, can_ins_mask, _tokens, pad)
             output_scores = _fill(output_scores, can_ins_mask, _scores, 0)
 
         # insert words
-        can_ins_word = output_tokens.eq(self.unk).sum(1) > 0
-        if can_ins_word.sum() != 0:
-            # print(f"step:{step}, can_ins_word: {can_ins_word.sum()}/{bsz} samples can insert words")
-            precursors_tmp, memory_tmp, memory_key_padding_mask_tmp=_skip_encoder_out_with_func(SpectrumEncoder.reorder_encoder_out,
-                                            precursors, memory, memory_key_padding_mask, can_ins_word)
-            # print(f"step:{step}, prev_output_tokens: {_skip(output_tokens, can_ins_word)}")
-            predict_mask_tokens = _skip(output_tokens, can_ins_word)
-            word_ins_score, word_ins_attn = self.forward_word_ins(
+        unk_counts = output_tokens.eq(unk).sum(1)
+        can_ins_word = unk_counts > 0
+        if can_ins_word.any():
+            idx = can_ins_word.nonzero(as_tuple=False).squeeze(1)
+            prec_i   = precursors.index_select(0, idx)
+            mem_i    = memory.index_select(0, idx)
+            mem_m_i  = memory_key_padding_mask.index_select(0, idx)
+            tok_i    = output_tokens.index_select(0, idx)
+
+            # [N, T, V]
+            word_ins_score, _ = self.forward_word_ins(
                 normalize=True,
-                precurosors=precursors_tmp,
-                encoder_out_mask=memory_key_padding_mask_tmp,
-                encoder_out=memory_tmp,
-                prev_output_tokens=predict_mask_tokens,
+                precurosors=prec_i,
+                encoder_out=mem_i,
+                encoder_out_mask=mem_m_i,
+                prev_output_tokens=tok_i,
             )
-            # 2. 构造一个 mask，标记出 prev_tokens 中等于 self.unk 的位置
-            # unk_mask = _skip(output_tokens, can_ins_word).eq(self.unk)   # shape: [N, L], dtype=torch.bool
 
-            # 3. 方法一：直接用 boolean indexing，一次性拿出所有 UNK 位置的得分向量
-            #    结果 unk_scores.shape == [总UNK个数, V]
-            # unk_scores = word_ins_score[unk_mask]
+            # 允许对 EOS 位置施加 penalty（只影响选择，不改 logits 其他列）
+            if eos_penalty > 0.0:
+                # 找到“可选位置”（即 true token 位；这里直接对整张量第0列进行惩罚更简单）
+                # 注：原实现对整子批做同列减法即可，无需循环
+                word_ins_score[..., 0] = word_ins_score[..., 0] - eos_penalty
+
             if early_exit:
-                return word_ins_score, predict_mask_tokens, True
-            # print(self._idx2aa)
-            # print(f"step {step}, 所有UNK位置的 word_ins_score：", unk_scores)
-            word_ins_score, word_ins_pred = word_ins_score.max(-1)
-            _tokens, _scores = _apply_ins_words(
-                output_tokens[can_ins_word],
-                output_scores[can_ins_word],
-                word_ins_pred,
-                word_ins_score,
-                self.unk,
-            )
+                return word_ins_score, tok_i, True
 
-            output_tokens = _fill(output_tokens, can_ins_word, _tokens, self.pad)
+            # best_score, best_idx: [N, T]
+            best_score, best_idx = word_ins_score.max(dim=-1)  # [N, T], [N, T]
+
+            _tokens, _scores = _apply_ins_words(
+                output_tokens.index_select(0, idx),
+                output_scores.index_select(0, idx),
+                best_idx,
+                best_score,
+                unk,
+            )
+            # 用 can_ins_word 掩码回填（与上两步一致）
+            output_tokens = _fill(output_tokens, can_ins_word, _tokens, pad)
             output_scores = _fill(output_scores, can_ins_word, _scores, 0)
 
         # delete some unnecessary paddings
-        cut_off = output_tokens.ne(self.pad).sum(1).max()
-        output_tokens = output_tokens[:, :cut_off]
-        output_scores = output_scores[:, :cut_off]
+        if output_tokens.numel() > 0:
+            col_has_token = output_tokens.ne(pad).any(dim=0)          # [T]
+            # 若全是 PAD，则保留至少一列
+            if col_has_token.any():
+                last_col = col_has_token.nonzero(as_tuple=False)[-1].item() + 1
+                output_tokens = output_tokens[:, :last_col]
+                output_scores = output_scores[:, :last_col]
+            else:
+                output_tokens = output_tokens[:, :1]
+                output_scores = output_scores[:, :1]
+
         if early_exit:
             return output_scores, output_tokens, False
-        else:
-            return decoder_out._replace(
-                output_tokens=output_tokens,
-                output_scores=output_scores,
-            )
 
+        return decoder_out._replace(
+            output_tokens=output_tokens,
+            output_scores=output_scores,
+        )
     
-    
-
     def forward_beam_decoder(self, encoder, decoder_out, precursors, memory, memory_key_padding_mask,
                               n_beam, spectra_index):
         cache_result: Dict[int, List[Tuple[torch.Tensor, torch.Tensor]]] = {}
@@ -898,6 +923,101 @@ class PeptideDecoder(_PeptideTransformer):
         new_scores = new_scores.view(B * beam_size, T)  # [B*S, T]
         return new_tokens, new_scores
 
+    def _learn_insert(self, prev_output_tokens, tgt_tokens, precursors, memory, memory_key_padding_mask):
+        # ---- targets for mask insertion ----
+        masked_tgt_masks, masked_tgt_tokens, mask_ins_targets = _get_ins_targets(
+            prev_output_tokens, tgt_tokens, self.pad, self.unk
+        )
+        mask_ins_targets = mask_ins_targets.clamp_(min=0, max=31)
+        mask_ins_masks = prev_output_tokens[:, 1:].ne(self.pad)
+
+        # ---- heads ----
+        mask_ins_out, _ = self.forward_mask_ins(
+            normalize=False,
+            precurosors=precursors,
+            encoder_out=memory,
+            encoder_out_mask=memory_key_padding_mask,
+            prev_output_tokens=prev_output_tokens,
+        )
+        word_ins_out, word_att = self.forward_word_ins(
+            normalize=False,
+            precurosors=precursors,
+            encoder_out=memory,
+            encoder_out_mask=memory_key_padding_mask,
+            prev_output_tokens=masked_tgt_tokens,
+        )
+
+        # ---- online greedy prediction only at masked positions ----
+        greedy_idx = word_ins_out.argmax(dim=2)
+        prediction = torch.where(masked_tgt_masks, greedy_idx, tgt_tokens)
+
+        return (prediction, word_ins_out, mask_ins_out,
+                mask_ins_targets, mask_ins_masks, masked_tgt_masks, word_att)
+
+
+    def _learn_delete(self, word_predictions, tgt_tokens, precursors, memory, memory_key_padding_mask):
+        word_del_targets = _get_del_targets(word_predictions, tgt_tokens, self.pad)
+        word_del_out, _ = self.forward_word_del(
+            normalize=False,
+            precurosors=precursors,
+            encoder_out=memory,
+            encoder_out_mask=memory_key_padding_mask,
+            prev_output_tokens=word_predictions,
+        )
+        word_del_masks = word_predictions.ne(self.pad)
+
+        # apply delete targets to word_predictions to get the final output
+        mask = (word_del_targets == 0)                 # True = keep
+        B, T = word_predictions.shape
+        out = torch.full_like(word_predictions, self.pad)
+
+        pos  = mask.cumsum(1) - 1                      # new column index for kept positions
+        rows = torch.arange(B, device=word_predictions.device).unsqueeze(1).expand(B, T)
+        out[rows[mask], pos[mask]] = word_predictions[mask]
+
+        keep_any = (out != self.pad).any(dim=0)                 # [T]
+        prefix_keep = keep_any.flip(0).cumsum(0).flip(0) > 0
+        idx = prefix_keep.nonzero().squeeze(1)
+        out = out.index_select(1, idx).contiguous()
+
+        return word_del_out, word_del_masks, word_del_targets, out
+
+
+    def _glc_fill(self, input_tokens, tgt_tokens, p: float):
+        # calculate distance-style partial refill (identical to your inner function)
+        masked_tgt_masks, masked_tgt_tokens, _ = _get_ins_targets(
+            input_tokens, tgt_tokens, self.pad, self.unk
+        )
+        device = masked_tgt_tokens.device
+        B, T = masked_tgt_tokens.shape
+
+        m = masked_tgt_masks.bool() if masked_tgt_masks is not None else (masked_tgt_tokens == self.unk)
+        valid = m & (tgt_tokens != self.pad) & (tgt_tokens != self.bos) & (tgt_tokens != self.eos)
+
+        masked_counts = valid.sum(dim=1)                                # (B,)
+        refill_counts = (masked_counts.float() * float(p)).floor().long()  # (B,)
+
+        scores = torch.rand(B, T, device=device)
+        scores = scores.masked_fill(~valid, float('inf'))
+
+        order = scores.argsort(dim=1)          # (B,T): indices sorted by score
+        ranks = order.argsort(dim=1)           # (B,T): rank within row
+        select = ranks < refill_counts.unsqueeze(1)
+
+        out = masked_tgt_tokens.clone()
+        out[select] = tgt_tokens[select]
+
+        remove = m & ~select
+        keep = ~remove
+        idx = torch.argsort((~keep).long(), dim=1, stable=True)
+        out = torch.gather(out, 1, idx)
+        keep_counts = keep.sum(dim=1)
+        arange = torch.arange(T, device=device).unsqueeze(0)
+        tail = arange >= keep_counts.unsqueeze(1)
+        out = out.masked_fill(tail, self.pad)
+        return out
+
+
     def forward(self, sequences, precursors, memory, memory_key_padding_mask, prob=0.5):
         """Predict the next amino acid for a collection of sequences.
 
@@ -952,134 +1072,29 @@ class PeptideDecoder(_PeptideTransformer):
         # ---------- Build prev_output_tokens (inject_noise / self_gen split) ----------
         if tokens.numel() == 0:
             prev_output_tokens = tokens
-        else:
             gen_from_scratch = False
-            # randomly select between self_gen and inject_noise
-            if random.random() < self.sampling_model_gen or self.training is False:
-                gen_from_scratch = True
+        else:
+            coin = torch.rand((), device=precursors.device)
+            gen_from_scratch = bool(coin < self.sampling_model_gen or (not self.training))
+            if gen_from_scratch:
                 prev_output_tokens = self.gen_from_scratch(precursors, memory, memory_key_padding_mask)
             else:
                 prev_output_tokens = self.inject_noise(tokens)
-        
-        def learn_insert(prev_output_tokens):
-            # ---------- Generate insertion targets ----------
-            masked_tgt_masks, masked_tgt_tokens, mask_ins_targets = _get_ins_targets(
-                prev_output_tokens, tgt_tokens, self.pad, self.unk
-            )
-            mask_ins_targets = mask_ins_targets.clamp_(min=0, max=31)             # in-place
-            mask_ins_masks = prev_output_tokens[:, 1:].ne(self.pad)
-
-            # # mask_ins_out shape: (batch_size, l - delete - 1, 32)
-            mask_ins_out, _ = self.forward_mask_ins(
-                normalize=False,
-                precurosors=precursors,
-                encoder_out=memory,
-                encoder_out_mask=memory_key_padding_mask,
-                prev_output_tokens=prev_output_tokens,
-            )
-            # word_ins_out shape: (batch_size, l, vocab_size)
-            word_ins_out, word_att = self.forward_word_ins(
-                normalize=False,
-                precurosors=precursors,
-                encoder_out=memory,
-                encoder_out_mask=memory_key_padding_mask,
-                prev_output_tokens=masked_tgt_tokens,
-            )
-            B, T, V = word_ins_out.shape
-            # make online prediction
-            
-            # ---------- Online prediction ----------
-            # Greedy: argmax on logits (no log_softmax needed)
-            greedy_idx = word_ins_out.argmax(dim=2)
-            word_predictions = greedy_idx
-
-            # At non-masked positions, force predictions to gold
-            word_predictions = torch.where(masked_tgt_masks, word_predictions, tgt_tokens)
-            return word_predictions, word_ins_out, mask_ins_out, mask_ins_targets, mask_ins_masks, masked_tgt_masks, word_att
-
-        def learn_delete(word_predictions, tgt_tokens):
-            # ---------- Deletion supervision ----------
-            word_del_targets = _get_del_targets(word_predictions, tgt_tokens, self.pad)
-            word_del_out, _ = self.forward_word_del(
-                normalize=False,
-                precurosors=precursors,
-                encoder_out=memory,
-                encoder_out_mask=memory_key_padding_mask,
-                prev_output_tokens=word_predictions,
-            )
-            word_del_masks = word_predictions.ne(self.pad)
-            # apply delete targets to word_predictions to get the final output
-            mask = (word_del_targets == 0)                 # True=保留
-            B, T = word_predictions.shape
-            out = torch.full_like(word_predictions, self.pad)
-
-            pos  = mask.cumsum(1) - 1                      # 新列索引(仅对保留位有意义)
-            rows = torch.arange(B, device=word_predictions.device).unsqueeze(1).expand(B, T)
-
-            out[rows[mask], pos[mask]] = word_predictions[mask]
-
-            keep_any = (out != self.pad).any(dim=0)                 # [T] 哪些列存在非 pad
-            prefix_keep = keep_any.flip(0).cumsum(0).flip(0) > 0    # [T] 前缀保留掩码
-            idx = prefix_keep.nonzero().squeeze(1)                  # [T_keep] 需要保留的列索引
-            out = out.index_select(1, idx).contiguous()
-
-            return word_del_out, word_del_masks, word_del_targets, out
-
-        def glc_fill(input_tokens, tgt_tokens, p):
-            # calcuate distance
-            masked_tgt_masks, masked_tgt_tokens, mask_ins_targets = _get_ins_targets(
-                input_tokens, tgt_tokens, self.pad, self.unk
-            )
-            device = masked_tgt_tokens.device
-            B, T = masked_tgt_tokens.shape
-
-            # Masked positions; prefer provided mask, otherwise infer from unk
-            m = masked_tgt_masks.bool() if masked_tgt_masks is not None else (masked_tgt_tokens == self.unk)
-
-            # Do not refill with PAD/BOS/EOS even if present in tgt
-            valid = m & (tgt_tokens != self.pad) & (tgt_tokens != self.bos) & (tgt_tokens != self.eos)
-
-            # Count per-sample valid masked positions and compute how many to refill
-            masked_counts = valid.sum(dim=1)                                # (B,)
-            refill_counts = (masked_counts.float() * float(p)).floor().long()  # (B,)
-
-            # Random scores for selection; invalid positions get +inf so they sort to the end
-            scores = torch.rand(B, T, device=device)
-            scores = scores.masked_fill(~valid, float('inf'))
-
-            # Per-row ranks (0 = smallest random score among valid positions)
-            order = scores.argsort(dim=1)          # (B,T): indices sorted by score
-            ranks = order.argsort(dim=1)           # (B,T): rank of each position in its row
-
-            # Select positions with rank < refill_counts (broadcasted per row)
-            select = ranks < refill_counts.unsqueeze(1)   # (B,T) boolean
-
-            # Write gold tokens into the selected masked positions
-            out = masked_tgt_tokens.clone()
-            out[select] = tgt_tokens[select]
-
-            # remove the tokens that is not filled
-            remove = m & ~select
-            keep = ~remove
-
-            idx = torch.argsort((~keep).long(), dim=1, stable=True)
-            out = torch.gather(out, 1, idx)
-            keep_counts = keep.sum(dim=1)                      # (B,)
-            arange = torch.arange(T, device=device).unsqueeze(0)
-            tail = arange >= keep_counts.unsqueeze(1)
-            out = out.masked_fill(tail, self.pad)
-
-            return out
-            
 
         if gen_from_scratch:
-            word_del_out, word_del_masks, word_del_targets, out = learn_delete(prev_output_tokens, tgt_tokens)
+            word_del_out, word_del_masks, word_del_targets, out = self._learn_delete(
+                prev_output_tokens, tgt_tokens, precursors, memory, memory_key_padding_mask
+            )
             if self.training:
-                out = glc_fill(out, tgt_tokens, p=prob)
-            prediction, word_ins_out, mask_ins_out, mask_ins_targets, mask_ins_masks, masked_tgt_masks, word_att = learn_insert(out)
+                out = self._glc_fill(out, tgt_tokens, p=prob)
+            prediction, word_ins_out, mask_ins_out, mask_ins_targets, mask_ins_masks, masked_tgt_masks, word_att = self._learn_insert(
+                out, tgt_tokens, precursors, memory, memory_key_padding_mask)
         else:
-            prediction, word_ins_out, mask_ins_out, mask_ins_targets, mask_ins_masks, masked_tgt_masks, word_att = learn_insert(prev_output_tokens)
-            word_del_out, word_del_masks, word_del_targets, _ = learn_delete(prediction, tgt_tokens)
+            if self.training:
+                out = self._glc_fill(prev_output_tokens, tgt_tokens, p=prob/5)
+            prediction, word_ins_out, mask_ins_out, mask_ins_targets, mask_ins_masks, masked_tgt_masks, word_att = self._learn_insert(
+                out, tgt_tokens, precursors, memory, memory_key_padding_mask)
+            word_del_out, word_del_masks, word_del_targets, _ = self._learn_delete(prediction, tgt_tokens, precursors, memory, memory_key_padding_mask)
         greedy_idx = prediction
 
         results = {
@@ -1410,8 +1425,8 @@ class PeptideDecoder(_PeptideTransformer):
             early_exit=self.early_exit[2],
             **unused
         )
-        # decoder_out = self.output_projection(features)
-        decoder_out = self.final(features)
+        decoder_out = self.output_projection(features)
+        # decoder_out = self.final(features)
         extra["attn"] = features
         if normalize:
             return F.log_softmax(decoder_out, -1), extra["attn"]

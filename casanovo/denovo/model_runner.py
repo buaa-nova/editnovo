@@ -31,8 +31,8 @@ logger = logging.getLogger("casanovo")
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-# Set float32 matrix multiplication precision to "medium" for a good balance
-torch.set_float32_matmul_precision("medium")
+# Set high precision for float32 matrix multiplications (PyTorch 2.0+).
+torch.set_float32_matmul_precision("high")
 
 
 
@@ -211,7 +211,9 @@ class ModelRunner:
         """
         trainer_cfg = dict(
             accelerator=self.config.accelerator,
-            devices=1,
+            devices="auto",
+            # precision="bf16-mixed", 
+            # deterministic=False,
             enable_checkpointing=False,
         )
 

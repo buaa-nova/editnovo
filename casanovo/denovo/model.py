@@ -1269,7 +1269,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 seq_loss = l["seq_loss"]
                 temp = 0.5
                 sim_tgt = torch.exp(-seq_loss/ temp)
-                loss_rank = F.binary_cross_entropy(rank["logit"], sim_tgt)
+                sim_tgt = sim_tgt.to(rank["logit"].device).float()
+                loss_rank = F.binary_cross_entropy_with_logits(rank["logit"], sim_tgt, reduction="mean")
+                # loss_rank = F.binary_cross_entropy(rank["logit"], sim_tgt)
 
 
         loss = sum(l["loss"] for l in losses)
@@ -1468,23 +1470,23 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         steps = []
         positional_scores = []
         scores = []
-        # for spectrum_preds in self.forward(batch[0], batch[1]):
-        #     for pred_dict in spectrum_preds:
+        for spectrum_preds in self.forward(batch[0], batch[1]):
+            for pred_dict in spectrum_preds:
                 
-        #         peptides_pred.append(pred_dict["sequence"])
-        #         steps.append(pred_dict["steps"])
-        #         if pred_dict["score"]:
-        #             scores.append(pred_dict["score"].cpu().detach().numpy())
-        #             positional_scores.append(pred_dict["positional_scores"].cpu().detach().numpy())
-        #         else:
-        #             scores.append(-100000)
-        #             positional_scores.append([-10000])
-        for spectrum_preds in self.beam_search_forward(batch[0], batch[1]):
-            for score, pos_score, pred_peptide_str in spectrum_preds:
-                peptides_pred.append(pred_peptide_str)
-                steps.append(-1)
-                scores.append(score.cpu().detach().numpy())
-                positional_scores.append(pos_score.cpu().detach().numpy())
+                peptides_pred.append(pred_dict["sequence"])
+                steps.append(pred_dict["steps"])
+                if pred_dict["score"]:
+                    scores.append(pred_dict["score"].cpu().detach().numpy())
+                    positional_scores.append(pred_dict["positional_scores"].cpu().detach().numpy())
+                else:
+                    scores.append(-100000)
+                    positional_scores.append([-10000])
+        # for spectrum_preds in self.beam_search_forward(batch[0], batch[1]):
+        #     for score, pos_score, pred_peptide_str in spectrum_preds:
+        #         peptides_pred.append(pred_peptide_str)
+        #         steps.append(-1)
+        #         scores.append(score.cpu().detach().numpy())
+        #         positional_scores.append(pos_score.cpu().detach().numpy())
 
 
         
@@ -1782,9 +1784,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         Returns
         -------
         Tuple[torch.optim.Optimizer, Dict[str, Any]]
-            The initialized Adam optimizer and its learning rate scheduler.
+            The initialized AdamW optimizer and its learning rate scheduler.
         """
-        optimizer = torch.optim.Adam(self.parameters(), **self.opt_kwargs, fused=True)
+        optimizer = torch.optim.AdamW(self.parameters(), **self.opt_kwargs, fused=True)
         # Apply learning rate scheduler per step.
         lr_scheduler = CosineWarmupConstantScheduler(
             optimizer, 
