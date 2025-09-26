@@ -613,7 +613,7 @@ class PeptideDecoder(_PeptideTransformer):
             if eos_penalty > 0.0:
                 # 找到“可选位置”（即 true token 位；这里直接对整张量第0列进行惩罚更简单）
                 # 注：原实现对整子批做同列减法即可，无需循环
-                word_ins_score[..., 0] = word_ins_score[..., 0] - eos_penalty
+                word_ins_score[..., eos] = word_ins_score[..., eos] - eos_penalty
 
             if early_exit:
                 return word_ins_score, tok_i, True
@@ -948,6 +948,9 @@ class PeptideDecoder(_PeptideTransformer):
         )
 
         # ---- online greedy prediction only at masked positions ----
+        # greedy_idx = torch.multinomial(
+        #     F.softmax(word_ins_out, -1).view(-1, word_ins_out.size(-1)), 1
+        # ).view(word_ins_out.size(0), -1)
         greedy_idx = word_ins_out.argmax(dim=2)
         prediction = torch.where(masked_tgt_masks, greedy_idx, tgt_tokens)
 
@@ -1204,10 +1207,7 @@ class PeptideDecoder(_PeptideTransformer):
 
             return prev_target_tokens, edge_mask
    
-        def _random_delete(target_tokens, 
-                           max_ratio: float = 0.0):
-           
-
+        def _random_delete(target_tokens, max_ratio: float = 0.0):
             max_len = target_tokens.size(1)
             target_mask = target_tokens.eq(self.pad)
             target_score = target_tokens.clone().float().uniform_()
@@ -1225,7 +1225,7 @@ class PeptideDecoder(_PeptideTransformer):
                 2
                 + (
                     (target_length - 2)
-                    * target_score.new_zeros(target_score.size(0), 1).uniform_(max_ratio, 1.0)
+                    * (1.0 - target_score.new_zeros(target_score.size(0), 1).uniform_(max_ratio, 1.0))
                 ).long()
             ) if max_ratio > 0 else (
                 2
