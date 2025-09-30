@@ -2,8 +2,10 @@
 
 from ast import Assert
 import collections
+import copy
 import heapq
 import logging
+import re
 import warnings
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 import torch.nn.functional as F
@@ -671,7 +673,8 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
     
 
     def forward(
-        self, spectra: torch.Tensor, precursors: torch.Tensor
+        self, spectra: torch.Tensor, precursors: torch.Tensor, 
+        prev_output_tokens: Optional[torch.Tensor] = None
     ) -> List[List[Dict]]:
         """
         Predict peptide sequences for a batch of MS/MS spectra.
@@ -695,16 +698,24 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             peptide predictions consists of a tuple with the peptide score,
             the amino acid scores, and the predicted peptide sequence.
         """
-       
+        flag = prev_output_tokens is not None
         memory, memory_key_padding_mask = self.encoder(spectra)
         # Prepare mass and charge
         masses = self.decoder.mass_encoder(precursors[:, None, 0])
         charges = self.decoder.charge_encoder(precursors[:, 1].int() - 1)
         precursors_embedding = masses + charges[:, None, :]
         bsz = spectra.size(0)
-        prev_decoder_out = self.initialize_output_tokens(memory)
         sent_idxs = torch.arange(bsz)
-        prev_output_tokens = prev_decoder_out.output_tokens.clone()
+        if prev_output_tokens is None:
+            prev_decoder_out = self.initialize_output_tokens(memory)
+            prev_output_tokens = prev_decoder_out.output_tokens.clone()
+        else:
+            prev_decoder_out = self.initialize_output_tokens(memory)
+            prev_decoder_out = prev_decoder_out._replace(
+                output_tokens=prev_output_tokens,
+                output_scores=torch.zeros_like(prev_output_tokens).float(),
+            )
+
         finalized = [[] for _ in range(bsz)]
         for step in range(self.max_iter + 1):
             # decoder_options = {
@@ -715,6 +726,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 step=step,
                 max_step=self.max_iter + 1,
             )
+            # if flag:
+            #     print(f"Step {step}, prev_output_tokens: {prev_decoder_out.output_tokens}")
+            #     print(f"Step {step}, prev_output_scores: {prev_decoder_out.output_scores}")
 
             decoder_out = self.decoder.forward_decoder(
                 step, self.encoder, prev_decoder_out, precursors_embedding, memory, memory_key_padding_mask
@@ -1470,22 +1484,156 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         steps = []
         positional_scores = []
         scores = []
+        prev_sampling_tokens = [] 
+        
+        n_spectra = 0
         for spectrum_preds in self.forward(batch[0], batch[1]):
+            if n_spectra == 6:
+                print(n_spectra)
+            
+            peptide1 = peptides_true[n_spectra]
+            spectra_fill = False
             for pred_dict in spectrum_preds:
+                mask_position = pred_dict["positional_scores"] < -0.2
+                num_true = (mask_position == True).sum().item()
+                orginal_predict = copy.deepcopy(pred_dict)
                 
-                peptides_pred.append(pred_dict["sequence"])
-                steps.append(pred_dict["steps"])
+     
+                peptide2 = pred_dict["sequence"]
+                if isinstance(peptide1, str):
+                    peptide1 = re.split(r"(?<=.)(?=[A-Z])", peptide1)
+                if isinstance(peptide2, str):
+                    peptide2 = re.split(r"(?<=.)(?=[A-Z])", peptide2)
+                
+                _, peptide_match = evaluate.aa_match(
+                        peptide1,
+                        peptide2,
+                        self.decoder._peptide_mass.masses,
+                    )
+                if peptide_match or (num_true <= 0):
+                    peptides_pred.append(pred_dict["sequence"])
+                    steps.append(pred_dict["steps"])
+                    if pred_dict["score"]:
+                        scores.append(pred_dict["score"].cpu().detach().numpy())
+                        positional_scores.append(pred_dict["positional_scores"].cpu().detach().numpy())
+                    else:
+                        scores.append(-100000)
+                        positional_scores.append([-10000])
+                    spectra_fill = True
+                    break
+                # pred_dict["positional_scores"] where score < -0.2
+                
+                
+                    
+            
+                tokens = self.decoder.tokenize(pred_dict["sequence"])
+                
+                pad_false = torch.tensor([False], device=tokens.device, dtype=torch.bool)
+                mask_position = torch.cat([pad_false, mask_position, pad_false], dim=0)
+                
+            
+                tokens[mask_position] = self.decoder.unk
+                memory, memory_key_padding_mask = self.encoder(batch[0])
+                # Prepare mass and charge
+                masses = self.decoder.mass_encoder(batch[1][:, None, 0])
+                charges = self.decoder.charge_encoder(batch[1][:, 1].int() - 1)
+                precursors_embedding = masses + charges[:, None, :]
+                word_ins_score, _ = self.decoder.forward_word_ins(
+                    normalize=True,
+                    precurosors=precursors_embedding[n_spectra].unsqueeze(0),
+                    encoder_out=memory[n_spectra].unsqueeze(0),
+                    encoder_out_mask=memory_key_padding_mask[n_spectra].unsqueeze(0),
+                    prev_output_tokens=tokens.unsqueeze(0),
+                )
+                try:
+                    # print(f"{n_spectra}")
+                    topv, topi = torch.topk(word_ins_score[0], k=5, dim=-1)  # topv/topi: [B, T, 2]
+                    
+                except Exception as e:
+                    print(f"n_spectra:{n_spectra}, word_ins_score.shape: {word_ins_score[0].shape}")
+
+    
+                true_idx = torch.nonzero(mask_position, as_tuple=False).squeeze(1)  # [N]
+                # K 可以是 topi.size(1)，也可以你自己设定上限
+                K = min(5, topi.size(1))
+
+                # 复制 K 份原序列 -> [K, T]
+                seqs = tokens.unsqueeze(0).repeat(K, 1)  # dtype 与 tokens 一致
+
+                # 只在 true_idx 上回填，不改其他位置
+                # topi[true_idx] -> [M, K]，转置后是 [K, M]，与 seqs[:, true_idx] 的形状对齐
+                seqs[:, true_idx] = topi[true_idx, :K].T
+
+
+
+                # for pos in true_idx.tolist():
+                #     edited = tokens.clone()
+                #     edited[pos] = topi[pos, 1].to(dtype=tokens.dtype)   # 回填 rank2 token
+                #     edited = edited[edited != self.decoder.unk]  # 变长 1D
+                #     seqs.append(edited)
+                # seqs.append(torch.tensor([28,  2, 16,  1, 10,  3, 3, 15,  5, 18, 29]).to(device=tokens.device))
+                # seqs.append(torch.tensor([28,  2, 16,  1, 10,  3, 3, 15,  5, 18, 29]).to(device=tokens.device))
+                # seqs.append(torch.tensor([28,  2, 16,  1, 10,  1, 1, 15,  5, 18, 29]).to(device=tokens.device))
+                # seqs.append(torch.tensor([28,  2, 16,  1, 10,  3, 1,  5, 18, 29]).to(device=tokens.device))
+                # seqs.append(torch.tensor([28,  8, 12, 16, 14,  2, 6, 2,  2,  6, 12, 13, 29]).to(device=tokens.device))
+                
+                # seqs.append(torch.tensor([28,  8, 12, 16, 14,  2, 6, 6,  2,  6, 12, 13, 29]).to(device=tokens.device))
+                
+                # seqs = torch.stack(seqs, dim=0)  # [N, L']
+                # print(f"current seqs:{seqs}")
+                
+                B = len(seqs)
+                spec = batch[0][n_spectra]            # [n_peaks, 2]
+                spec_rep = spec.unsqueeze(0).expand(B, -1, -1)  # [B, n_peaks, 2]
+                
+
+                for spectrum_preds in self.forward(spec_rep, batch[1][n_spectra].unsqueeze(0).expand(B, -1), prev_output_tokens=seqs):
+                    for pred_dict in spectrum_preds:
+                        peptide2 = pred_dict["sequence"]
+                        if isinstance(peptide1, str):
+                            peptide1 = re.split(r"(?<=.)(?=[A-Z])", peptide1)
+                        if isinstance(peptide2, str):
+                            peptide2 = re.split(r"(?<=.)(?=[A-Z])", peptide2)
+                        
+                        _, peptide_match = evaluate.aa_match(
+                                peptide1,
+                                peptide2,
+                                self.decoder._peptide_mass.masses,
+                            )
+                        # print(f"compare: peptide1:{peptide1} to peptide2:{peptide2}, match:{peptide_match}")
+                        if peptide_match:
+                            peptides_pred.append(pred_dict["sequence"])
+                            steps.append(pred_dict["steps"])
+                            if pred_dict["score"]:
+                                scores.append(pred_dict["score"].cpu().detach().numpy())
+                                positional_scores.append(pred_dict["positional_scores"].cpu().detach().numpy())
+                            else:
+                                scores.append(-100000)
+                                positional_scores.append([-10000])
+                            spectra_fill = True
+
+                            break
+                    if spectra_fill:
+                        break
+                            
+                        
+
+        
+            
+            n_spectra += 1
+            if not spectra_fill:
+                print("fill orginal_predict")
+                peptides_pred.append(orginal_predict["sequence"])
+                steps.append(orginal_predict["steps"])
                 if pred_dict["score"]:
-                    scores.append(pred_dict["score"].cpu().detach().numpy())
-                    positional_scores.append(pred_dict["positional_scores"].cpu().detach().numpy())
+                    scores.append(orginal_predict["score"].cpu().detach().numpy())
+                    positional_scores.append(orginal_predict["positional_scores"].cpu().detach().numpy())
                 else:
                     scores.append(-100000)
                     positional_scores.append([-10000])
-        # for spectrum_preds in self.beam_search_forward(batch[0], batch[1]):
-        #     for score, pos_score, pred_peptide_str in spectrum_preds:
-        #         peptides_pred.append(pred_peptide_str)
-        #         steps.append(-1)
-        #         scores.append(score.cpu().detach().numpy())
+
+            
+
         #         positional_scores.append(pos_score.cpu().detach().numpy())
 
 
