@@ -1543,6 +1543,8 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         mass_to_bin = lambda m: (m / self.DP_BIN_SIZE).round().long()
 
         # --- 3. Get Masses (Binned and Exact) ---
+        # Convert true_idx to a tensor for easier indexing later
+        true_idx_tensor = torch.tensor(true_idx, device=seqs.device, dtype=torch.long) 
         optional_masses_exact = self.aa_mass[seqs[:, true_idx]] # (n, k)
         optional_masses_binned = mass_to_bin(optional_masses_exact) # (n, k)
         optional_masses_binned[optional_masses_binned < 0] = 0
@@ -1551,35 +1553,31 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         max_possible_mass_Da = optional_masses_exact.sum(dim=-1).max().item() + search_window_Da
         max_mass_bin = mass_to_bin(max_possible_mass_Da).item() + 1
         
-        # DP table now just tracks reachability (True/False)
         dp = torch.full((n, num_optional + 1, max_mass_bin), False, device=seqs.device, dtype=torch.bool)
         bp = torch.full((n, num_optional + 1, max_mass_bin), 0, device=seqs.device, dtype=torch.int8)
-        dp[:, 0, 0] = True # Base case: 0 mass is reachable with 0 items
+        dp[:, 0, 0] = True # Base case
 
         for i in range(num_optional):
-            item_mass_binned = optional_masses_binned[:, i]
+            item_mass_binned = optional_masses_binned[:, i] # (n)
+            dp_prev, dp_next, bp_next = dp[:, i, :], dp[:, i+1, :], bp[:, i+1, :]
             
-            dp_prev = dp[:, i, :]
-            dp_next = dp[:, i+1, :]
-            bp_next = bp[:, i+1, :]
-            
-            # Option 1: Don't take item i
+            # 1. Propagate "don't take" paths
             dp_next[:] = dp_prev
-            bp_next[:] = 0 # Mark as 'not taken'
-            
-            # Option 2: Take item i
-            candidate_paths = torch.full_like(dp_prev, False)
+            bp_next[:] = 0 
+
+            # 2. Find states reachable by "taking" the item
+            candidate_take_paths = torch.full_like(dp_prev, False)
             for b in range(n):
                 m_bin = item_mass_binned[b].item()
                 if not (0 <= m_bin < max_mass_bin): continue
                 valid_prev_bins = max_mass_bin - m_bin
-                candidate_paths[b, m_bin:] = dp_prev[b, :valid_prev_bins]
+                prev_reachable = dp_prev[b, :valid_prev_bins]
+                candidate_take_paths[b, m_bin:][prev_reachable] = True
 
-            # Update: if this new path is reachable, mark it.
-            # We *overwrite* the 'not taken' path, as we only need *a* path.
-            update_mask = candidate_paths
-            dp_next[update_mask] = True
-            bp_next[update_mask] = 1 # Mark as 'taken'
+            # 3. Update DP and BP tables
+            newly_reachable_mask = candidate_take_paths & ~dp_next
+            dp_next[newly_reachable_mask] = True
+            bp_next[newly_reachable_mask] = 1
 
         # --- 5. Find All Candidate Paths from DP ---
         final_paths = []
@@ -1597,8 +1595,6 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 continue
 
             valid_bins_indices = torch.arange(min_bin, max_bin + 1, device=seqs.device, dtype=torch.long)
-            
-            # Find bins that were reachable (state is True)
             reachable_mask = final_dp_state[b, valid_bins_indices]
             candidate_bins = valid_bins_indices[reachable_mask]
             
@@ -1610,15 +1606,17 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             b_optional_masses_exact = optional_masses_exact[b]
 
             for current_bin in candidate_bins:
-                path_mask = torch.zeros(num_optional, device=seqs.device, dtype=torch.int8)
+                # Reconstruct the *binary mask*
+                path_mask = torch.zeros(num_optional, device=seqs.device, dtype=torch.bool)
                 temp_bin = current_bin.item()
                 for k_idx in range(num_optional, 0, -1):
                     if bp[b, k_idx, temp_bin].item() == 1:
-                        path_mask[k_idx-1] = 1
+                        path_mask[k_idx-1] = True
                         item_mass_bin = optional_masses_binned[b, k_idx-1].item()
                         temp_bin -= item_mass_bin
                 
                 # --- VALIDATION STEP using EXACT mass ---
+                # We must use the mask for validation, as the mass is calculated from it
                 exact_optional_mass = (b_optional_masses_exact * path_mask).sum()
                 exact_total_residue_mass = fixed_masses[b] + exact_optional_mass
                 exact_neutral_mass = exact_total_residue_mass + self.peptide_mass_calculator.h2o
@@ -1632,11 +1630,13 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                         break
                 
                 if is_valid:
-                    batch_paths.append(path_mask)
+                    # --- MODIFICATION HERE ---
+                    # Convert the binary mask [True, True, False]
+                    # to sequence indices [2, 3]
+                    path_indices = true_idx_tensor[path_mask]
+                    batch_paths.append(path_indices)
 
             # --- 7. Store List of *All* Valid Paths ---
-            # Note: This may contain duplicates if the DP found redundant paths
-            # to different bins that were actually the same path.
             final_paths.append(batch_paths)
                 
         return final_paths
