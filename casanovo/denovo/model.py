@@ -225,6 +225,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         )
         self.dual_training_for_deletion = dual_training_for_deletion
         self.dual_training_for_insertion = dual_training_for_insertion
+        self.aa_mass = self.peptide_mass_calculator.mass_tensor
+        self.DP_BIN_SIZE = 0.01
+        self.MASS_C13_DIFF = 1.00335
 
     
     def freeze_encoder_decoder(self):
@@ -1494,6 +1497,150 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
     def _is_mass_match_list(self, seq_list: str, obs_mz: float, charge: int) -> list:
         return [self._is_mass_match(seq, obs_mz, charge) for seq in seq_list]
 
+    def find_possible_path(self, seqs: torch.Tensor, score: torch.Tensor, true_idx: list, mz: float, charges: float):
+        """
+        Find possible peptide sequences by filling in the masked positions
+        based on precursor mass constraints.
+        
+        Arguments:
+        - seqs (torch.Tensor): The candidate sequences, shape (n, seq_len).
+        - score (torch.Tensor): The score matrix for each possible position, shape (n, seq_len).
+        - true_idx (list): The indices of the masked positions in the sequences.
+        - mz (float): The target m/z for each candidate.
+        - charges (float): The charge state for each peptide sequence.
+
+        Returns:
+        - possible_paths (list): A list of possible paths satisfying the mass constraint.
+        - scores (torch.Tensor): The score for each path, shape (n, num_possible_paths).
+        """
+        n, seq_len = seqs.shape
+        num_optional = len(true_idx)
+
+        # --- 1. Calculate fixed-part mass (once) ---
+        all_indices = set(range(seq_len))
+        true_idx_set = set(int(i) for i in true_idx)
+        fixed_idx = sorted(list(all_indices - true_idx_set))
+        if self.aa_mass.device != seqs.device:
+            self.aa_mass = self.aa_mass.to(seqs.device)
+
+        if len(fixed_idx) > 0:
+            fixed_masses = self.aa_mass[seqs[:, fixed_idx]].sum(dim=1) # Shape (n)
+        else:
+            fixed_masses = torch.zeros(n, device=self.device, dtype=torch.float32)
+        fixed_scores = torch.zeros(n, device=seqs.device, dtype=torch.float32)
+        
+        # --- 2. Define Mass Targets & Binning ---
+        target_peptide_mass = (mz * charges) - charges * self.peptide_mass_calculator.proton
+        target_residue_mass = target_peptide_mass - self.peptide_mass_calculator.h2o
+        # required_mass is the mass we need to fill with *optional* AAs
+        required_mass = target_residue_mass - fixed_masses # Shape (n)
+
+        # Define a wide-enough search window for the binned DP.
+        # It must account for the PPM tolerance, isotope error, and binning error.
+        mass_tolerance_Da = (mz * self.precursor_mass_tol) / 1.0e6
+        isotope_mass_shift = self.isotope_error_range[1] * self.MASS_C13_DIFF
+        search_window_Da = mass_tolerance_Da + isotope_mass_shift + self.DP_BIN_SIZE
+        mass_to_bin = lambda m: (m / self.DP_BIN_SIZE).round().long()
+
+        # --- 3. Get Masses (Binned and Exact) ---
+        optional_masses_exact = self.aa_mass[seqs[:, true_idx]] # (n, k)
+        optional_masses_binned = mass_to_bin(optional_masses_exact) # (n, k)
+        optional_masses_binned[optional_masses_binned < 0] = 0
+
+        # --- 4. Prepare and Run DP Table (0/1 Knapsack) ---
+        max_possible_mass_Da = optional_masses_exact.sum(dim=-1).max().item() + search_window_Da
+        max_mass_bin = mass_to_bin(max_possible_mass_Da).item() + 1
+        
+        # DP table now just tracks reachability (True/False)
+        dp = torch.full((n, num_optional + 1, max_mass_bin), False, device=seqs.device, dtype=torch.bool)
+        bp = torch.full((n, num_optional + 1, max_mass_bin), 0, device=seqs.device, dtype=torch.int8)
+        dp[:, 0, 0] = True # Base case: 0 mass is reachable with 0 items
+
+        for i in range(num_optional):
+            item_mass_binned = optional_masses_binned[:, i]
+            
+            dp_prev = dp[:, i, :]
+            dp_next = dp[:, i+1, :]
+            bp_next = bp[:, i+1, :]
+            
+            # Option 1: Don't take item i
+            dp_next[:] = dp_prev
+            bp_next[:] = 0 # Mark as 'not taken'
+            
+            # Option 2: Take item i
+            candidate_paths = torch.full_like(dp_prev, False)
+            for b in range(n):
+                m_bin = item_mass_binned[b].item()
+                if not (0 <= m_bin < max_mass_bin): continue
+                valid_prev_bins = max_mass_bin - m_bin
+                candidate_paths[b, m_bin:] = dp_prev[b, :valid_prev_bins]
+
+            # Update: if this new path is reachable, mark it.
+            # We *overwrite* the 'not taken' path, as we only need *a* path.
+            update_mask = candidate_paths
+            dp_next[update_mask] = True
+            bp_next[update_mask] = 1 # Mark as 'taken'
+
+        # --- 5. Find All Candidate Paths from DP ---
+        final_paths = []
+        target_mass_binned = mass_to_bin(required_mass)
+        tol_binned = mass_to_bin(search_window_Da)
+        final_dp_state = dp[:, num_optional, :] # (n, max_mass_bin)
+
+        for b in range(n):
+            min_bin = max(0, (target_mass_binned[b] - tol_binned).item())
+            max_bin = min(max_mass_bin - 1, (target_mass_binned[b] + tol_binned).item())
+
+            batch_paths = []
+            if min_bin > max_bin:
+                final_paths.append(batch_paths)
+                continue
+
+            valid_bins_indices = torch.arange(min_bin, max_bin + 1, device=seqs.device, dtype=torch.long)
+            
+            # Find bins that were reachable (state is True)
+            reachable_mask = final_dp_state[b, valid_bins_indices]
+            candidate_bins = valid_bins_indices[reachable_mask]
+            
+            if candidate_bins.numel() == 0:
+                final_paths.append(batch_paths)
+                continue
+
+            # --- 6. Backtrack and Validate Each Candidate ---
+            b_optional_masses_exact = optional_masses_exact[b]
+
+            for current_bin in candidate_bins:
+                path_mask = torch.zeros(num_optional, device=seqs.device, dtype=torch.int8)
+                temp_bin = current_bin.item()
+                for k_idx in range(num_optional, 0, -1):
+                    if bp[b, k_idx, temp_bin].item() == 1:
+                        path_mask[k_idx-1] = 1
+                        item_mass_bin = optional_masses_binned[b, k_idx-1].item()
+                        temp_bin -= item_mass_bin
+                
+                # --- VALIDATION STEP using EXACT mass ---
+                exact_optional_mass = (b_optional_masses_exact * path_mask).sum()
+                exact_total_residue_mass = fixed_masses[b] + exact_optional_mass
+                exact_neutral_mass = exact_total_residue_mass + self.peptide_mass_calculator.h2o
+                calc_mz = (exact_neutral_mass + charges * self.peptide_mass_calculator.proton) / charges
+                
+                is_valid = False
+                for isotope in range(self.isotope_error_range[0], self.isotope_error_range[1] + 1):
+                    delta_ppm = _calc_mass_error(calc_mz, mz, charges, isotope)
+                    if abs(delta_ppm) < self.precursor_mass_tol:
+                        is_valid = True
+                        break
+                
+                if is_valid:
+                    batch_paths.append(path_mask)
+
+            # --- 7. Store List of *All* Valid Paths ---
+            # Note: This may contain duplicates if the DP found redundant paths
+            # to different bins that were actually the same path.
+            final_paths.append(batch_paths)
+                
+        return final_paths
+
     def validation_step(
         self, batch: Tuple[torch.Tensor, torch.Tensor, List[str]], *args
     ) -> torch.Tensor:
@@ -1589,19 +1736,19 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                     prev_output_tokens=tokens.unsqueeze(0),
                 )
                 try:
-                    topv, topi = torch.topk(word_ins_score[0], k=10, dim=-1)  # topv/topi: [B, T, 2]
+                    topv, topi = torch.topk(word_ins_score[0], k=self.n_beams, dim=-1)  # topv/topi: [B, T, 2]
                 except Exception as e:
                     print(f"n_spectra:{n_spectra}, word_ins_score.shape: {word_ins_score[0].shape}")
 
                 true_idx = torch.nonzero(mask_position, as_tuple=False).squeeze(1)  # [N]
-                # K 可以是 topi.size(1)，也可以你自己设定上限
-                K = min(10, topi.size(1))
+                K = min(self.n_beams, topi.size(1))
                 # 复制 K 份原序列 -> [K, T]
                 seqs = tokens.unsqueeze(0).repeat(K, 1)  # dtype 与 tokens 一致
 
                 # 只在 true_idx 上回填，不改其他位置
                 # topi[true_idx] -> [M, K]，转置后是 [K, M]，与 seqs[:, true_idx] 的形状对齐
                 seqs[:, true_idx] = topi[true_idx, :K].T
+                self.find_possible_path(seqs, topv, true_idx, batch[1][n_spectra, 2], batch[1][n_spectra, 1])
                 B = len(seqs)
                 spec = batch[0][n_spectra]            # [n_peaks, 2]
                 spec_rep = spec.unsqueeze(0).expand(B, -1, -1)  # [B, n_peaks, 2]           

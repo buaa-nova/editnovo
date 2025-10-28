@@ -59,6 +59,10 @@ class PeptideMass:
     h2o = 2 * hydrogen + oxygen
     proton = 1.00727646688
 
+    import torch
+    _zero_tensor = torch.tensor([0.0])
+    mass_tensor = torch.cat((_zero_tensor, torch.tensor(list(canonical.values())), torch.tensor(list(massivekb.values())), _zero_tensor, _zero_tensor), dim=0)
+
     def __init__(self, residues="canonical"):
         """Initialize the PeptideMass object"""
         if residues == "canonical":
