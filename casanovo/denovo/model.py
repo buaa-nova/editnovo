@@ -1543,8 +1543,8 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 # 枚举该步所有候选
                 for j in range(K):
                     i = int(ids_step[j].item())        # 全局AA ID
-                    if l == 3 and t == 243 and i == 6:
-                        print("debug")
+                    # if l == 3 and t == 243 and i == 6:
+                    #     print("debug")
                     w_i = float(aa_mass[i].item())     # 该AA质量（已保证合法>0）
 
                     # 反推上一个 cell：tp 与 tp+1（两次尝试覆盖边界）
@@ -1552,8 +1552,8 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                     tp = int(base / grid_size)         # 向零截断，等价 C 的 int
                     for _ in range(2):
                         if 0 <= tp < cell_num and torch.isfinite(dp[l - 1, tp]):
-                            if l == 3 and t == 243:
-                                print("debug")
+                            # if l == 3 and t == 243:
+                            #     print("debug")
                             new_mass = float(dp_mass[l - 1, tp].item()) + w_i
 
                             # 非末cell：命中该bin；末cell：premass±tol
@@ -1613,7 +1613,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         required_mass = target_residue_mass - fixed_masses # Shape (n)
         aa_idxs = seqs.T[true_idx]  # (length,topk)
         # --- 4. Prepare and Run DP Table (0/1 Knapsack) ---
-        self.dp_path_search(scores[true_idx], aa_idxs, self.aa_mass, 
+        _, _, final_paths = self.dp_path_search(scores[true_idx], aa_idxs, self.aa_mass, 
                             required_mass[0], self.DP_BIN_SIZE, tol=0.1, device=seqs.device)
         
                 
@@ -1726,7 +1726,6 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 # 只在 true_idx 上回填，不改其他位置
                 # topi[true_idx] -> [M, K]，转置后是 [K, M]，与 seqs[:, true_idx] 的形状对齐
                 seqs[:, true_idx] = topi[true_idx, :K].T
-                self.find_possible_path(seqs, topv, true_idx, batch[1][n_spectra, 2], batch[1][n_spectra, 1])
                 B = len(seqs)
                 spec = batch[0][n_spectra]            # [n_peaks, 2]
                 spec_rep = spec.unsqueeze(0).expand(B, -1, -1)  # [B, n_peaks, 2]           
@@ -1762,6 +1761,19 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                     else:
                         scores.append(-100000)
                         positional_scores.append([-10000])
+                    spectra_fill = True
+                    break
+                path = self.find_possible_path(seqs, topv, true_idx, batch[1][n_spectra, 2], batch[1][n_spectra, 1])
+                if not torch.all(path[-1, -1, :len(true_idx)] == -1):
+                    aa_indices = path[-1, -1, :len(true_idx)]  # (length,)
+                    tokens[true_idx] = aa_indices.to(dtype=torch.int64)
+                    pred_dict["sequence"] = "".join(self.decoder.detokenize(tokens))
+                    pred_dict["sequence"] = pred_dict["sequence"][1:-1]  # remove <s> and </s>
+                    peptide =  pred_dict["sequence"]
+                    peptides_pred.append(peptide)
+                    steps.append(pred_dict["steps"])
+                    scores.append(-200000)
+                    positional_scores.append([-20000])
                     spectra_fill = True
                     break
             n_spectra += 1
