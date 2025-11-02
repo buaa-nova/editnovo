@@ -249,18 +249,18 @@ def aa_match_batch(
         match_count = int(flags.sum())
         # —— F. 日志输出
         # —— 在循环体内只打印内容，不带字段名
-        # logger.info(
-        #     "%s | %s | %s | %d | %d | %d| %d | %.2f | %s",
-        #     "".join(peptide1),
-        #     "".join(peptide2),
-        #     full_match,
-        #     match_count,
-        #     len(peptide1),
-        #     len(peptide2),
-        #     step,
-        #     score,
-        #     positional_score,
-        # )
+        logger.info(
+            "%s | %s | %s | %d | %d | %d| %d | %.2f | %s",
+            "".join(peptide1),
+            "".join(peptide2),
+            full_match,
+            match_count,
+            len(peptide1),
+            len(peptide2),
+            step,
+            score,
+            positional_score,
+        )
     return aa_matches_batch, n_aa1, n_aa2
 
 

@@ -97,7 +97,7 @@ class PeptideMass:
             seq = re.split(r"(?<=.)(?=[A-Z])", seq)
 
         try:
-            calc_mass = sum([self.masses[aa] for aa in seq]) + self.h2o
+            calc_mass = sum(0 if aa in {"&", "$", ""} else self.masses[aa] for aa in seq) + self.h2o
         except Exception as e:
             return float("nan")
         if charge is not None:

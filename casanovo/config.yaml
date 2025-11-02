@@ -16,7 +16,7 @@ isotope_error_range: [0, 1]
 # The minimum length of predicted peptides.
 min_peptide_len: 6
 # Number of spectra in one inference batch.
-predict_batch_size: 256
+predict_batch_size: 512
 # Number of beams used in beam search.
 n_beams: 5
 # Number of PSMs for each spectrum.
