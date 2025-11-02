@@ -1497,6 +1497,126 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
     def _is_mass_match_list(self, seq_list: str, obs_mz: float, charge: int) -> list:
         return [self._is_mass_match(seq, obs_mz, charge) for seq in seq_list]
     
+    def dp_path_search_topB(
+        self,
+        prob,         # (word_num, K)  本步每个候选的得分，与 aa_idxs 对齐
+        aa_idxs,      # (word_num, K)  本步可选的全局AA索引（已保证合法）
+        aa_mass,      # (V,) 或 (max_AA_id+1,) 每个AA的质量
+        premass: float,
+        grid_size: float,
+        tol: float,
+        B: int = 10,
+        device: torch.device | str | None = None,
+    ):
+        """
+        时间优先 DP（只新增一个AA，无ε/重复检查；整条路径直写）。
+        升级为：每个 (l, t) 保留 Top-B 条路径。
+        返回：
+            dp:      (length, cell_num, B)  每格前B得分（-inf 表示空位）
+            dp_mass: (length, cell_num, B)  对应质量（未命中为空位时内容无效）
+            paths:   (length, cell_num, B, length)  对应整条AA索引（空位填-1）
+        """
+        device = device or prob.device
+        word_num, K = prob.shape
+        length = word_num + 1
+        cell_num = int(premass / grid_size) + 1
+        last_cell = cell_num - 1
+
+        # 初始化
+        dp      = torch.full((length, cell_num, B), float("-inf"), dtype=torch.float32, device=device)
+        dp_mass = torch.zeros((length, cell_num, B), dtype=torch.float32, device=device)
+        paths   = torch.full((length, cell_num, B, length), -1, dtype=torch.int32, device=device)
+
+        # 起点：空序列位于 t=0，给它一个占位 beam（b=0）
+        dp[0, 0, 0] = 0.0
+        dp_mass[0, 0, 0] = 0.0
+        # paths[0,0,0,:] 全为 -1，表示空序列
+
+        # 一个小工具：把候选插入 (l,t) 的 top-B 中
+        def try_insert(l, t, cand_score, cand_mass, prev_prefix, cur_idx_pos, cur_aa_id):
+            """
+            prev_prefix: tensor(int32, shape=(length,))，上一层前缀路径（已-1填充）
+            cur_idx_pos: 当前要写入的位置（0..l-1）
+            cur_aa_id:   本步选择的全局AA id
+            """
+            # 找出当前最差（最小）分数所在的 beam 槽位
+            scores = dp[l, t]   # (B,)
+            min_idx = torch.argmin(scores)
+            min_val = scores[min_idx]
+
+            if cand_score > min_val:
+                # 覆盖写入
+                dp[l, t, min_idx] = cand_score
+                dp_mass[l, t, min_idx] = cand_mass
+
+                # 复制前缀 + 追加当前AA
+                # 注意 prev_prefix 是长度=length 的向量，只有 0..(l-2) 可能有效
+                # 这里直接整条拷贝更简单；再把 l-1 写成当前AA
+                paths[l, t, min_idx] = prev_prefix
+                paths[l, t, min_idx, cur_idx_pos] = cur_aa_id
+
+        # DP 主循环
+        for l in range(1, length):
+            ids_step  = aa_idxs[l - 1]      # (K,)
+            prob_step = prob[l - 1]         # (K,)
+
+            for t in range(1, cell_num):
+                if l == 3 and t == 243:
+                    print("debug")
+
+                # 枚举该步所有候选AA
+                for j in range(K):
+                    aa_id = int(ids_step[j].item())
+                    w_i = float(aa_mass[aa_id].item())  # 该AA质量（>0）
+
+                    # 反推上一个 cell：tp 与 tp+1（两次尝试覆盖边界）
+                    base = t * grid_size - w_i
+                    tp = int(base / grid_size)
+
+                    for _ in range(2):
+                        if 0 <= tp < cell_num:
+                            # 来自上一层的 top-B 都尝试扩展
+                            prev_scores = dp[l - 1, tp]    # (B,)
+                            # 只处理有限分的 beam
+                            finite_mask = torch.isfinite(prev_scores)
+                            if torch.any(finite_mask):
+                                idxs = torch.nonzero(finite_mask, as_tuple=False).squeeze(1)
+                                for b_prev in idxs.tolist():
+                                    prev_score = float(prev_scores[b_prev].item())
+                                    prev_mass  = float(dp_mass[l - 1, tp, b_prev].item())
+                                    new_mass   = prev_mass + w_i
+
+                                    # 非末cell：命中该bin；末cell：premass±tol
+                                    if t != last_cell:
+                                        in_bin = (t * grid_size <= new_mass) and (new_mass < (t + 1) * grid_size)
+                                    else:
+                                        in_bin = (premass - tol <= new_mass <= premass + tol)
+
+                                    if in_bin:
+                                        cand = prev_score + float(prob_step[j].item())
+
+                                        # 取出上一条前缀路径做复制（整条）
+                                        prev_prefix = paths[l - 1, tp, b_prev]  # (length,)
+                                        try_insert(
+                                            l, t,
+                                            cand_score=cand,
+                                            cand_mass=new_mass,
+                                            prev_prefix=prev_prefix,
+                                            cur_idx_pos=l - 1,
+                                            cur_aa_id=aa_id
+                                        )
+                        tp += 1  # 第二次尝试：tp+1
+
+        # 为了方便下游直接拿到“最终 top-B”，这里把最后一格 (length-1, last_cell, :)
+        # 的前B结果按分数降序排一下（可选）
+        final_scores = dp[length - 1, last_cell]  # (B,)
+        order = torch.argsort(final_scores, descending=True)
+        dp[length - 1, last_cell]     = final_scores[order]
+        dp_mass[length - 1, last_cell] = dp_mass[length - 1, last_cell][order]
+        paths[length - 1, last_cell]   = paths[length - 1, last_cell][order]
+
+        return dp, dp_mass, paths
+    
     def dp_path_search(   
         self,
         prob,         # (word_num, K)  本步每个候选的得分，与 aa_idxs 对齐
@@ -1613,11 +1733,11 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         required_mass = target_residue_mass - fixed_masses # Shape (n)
         aa_idxs = seqs.T[true_idx]  # (length,topk)
         # --- 4. Prepare and Run DP Table (0/1 Knapsack) ---
-        _, _, final_paths = self.dp_path_search(scores[true_idx], aa_idxs, self.aa_mass, 
+        dp, dp_mass, final_paths = self.dp_path_search_topB(scores[true_idx], aa_idxs, self.aa_mass, 
                             required_mass[0], self.DP_BIN_SIZE, tol=0.1, device=seqs.device)
         
                 
-        return final_paths
+        return dp, dp_mass, final_paths
 
     def validation_step(
         self, batch: Tuple[torch.Tensor, torch.Tensor, List[str]], *args
@@ -1763,19 +1883,25 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                         positional_scores.append([-10000])
                     spectra_fill = True
                     break
-                path = self.find_possible_path(seqs, topv, true_idx, batch[1][n_spectra, 2], batch[1][n_spectra, 1])
-                if not torch.all(path[-1, -1, :len(true_idx)] == -1):
-                    aa_indices = path[-1, -1, :len(true_idx)]  # (length,)
-                    tokens[true_idx] = aa_indices.to(dtype=torch.int64)
-                    pred_dict["sequence"] = "".join(self.decoder.detokenize(tokens))
-                    pred_dict["sequence"] = pred_dict["sequence"][1:-1]  # remove <s> and </s>
-                    peptide =  pred_dict["sequence"]
-                    peptides_pred.append(peptide)
-                    steps.append(pred_dict["steps"])
-                    scores.append(-200000)
-                    positional_scores.append([-20000])
-                    spectra_fill = True
-                    break
+                dp, dp_mass, final_paths = self.find_possible_path(seqs, topv, true_idx, batch[1][n_spectra, 2], batch[1][n_spectra, 1])
+                for i in range(10):
+                    if not torch.all(final_paths[-1, -1, :len(true_idx)] == -1):
+                        print(final_paths[-1, -1, i, :len(true_idx)])
+                        print(dp[-1, -1, i])
+                    else:
+                        break
+                # if not torch.all(path[-1, -1, :len(true_idx)] == -1):
+                #     aa_indices = path[-1, -1, :len(true_idx)]  # (length,)
+                #     tokens[true_idx] = aa_indices.to(dtype=torch.int64)
+                #     pred_dict["sequence"] = "".join(self.decoder.detokenize(tokens))
+                #     pred_dict["sequence"] = pred_dict["sequence"][1:-1]  # remove <s> and </s>
+                #     peptide =  pred_dict["sequence"]
+                #     peptides_pred.append(peptide)
+                #     steps.append(pred_dict["steps"])
+                #     scores.append(-200000)
+                #     positional_scores.append([-20000])
+                #     spectra_fill = True
+                #     break
             n_spectra += 1
             if not spectra_fill:
                 peptides_pred.append(orginal_predict["sequence"])
