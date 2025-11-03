@@ -1856,7 +1856,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                     print(f"n_spectra:{n_spectra}, word_ins_score.shape: {word_ins_score.shape}")
 
                 mask_position = (output_tensor == self.decoder.unk)
-                K = min(self.n_beams, topi.size(1))
+                K = min(self.n_beams, topi.size(2))
                 # 复制 K 份原序列 -> [K, T]
                 seqs = output_tensor.unsqueeze(1).repeat(1, K, 1)
                 sampled_indices = torch.randint(low=0, high=K, size=topi.shape, device=topi.device)
