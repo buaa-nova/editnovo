@@ -199,7 +199,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         self.precursor_mass_tol = precursor_mass_tol
         self.isotope_error_range = isotope_error_range
         self.min_peptide_len = min_peptide_len
-        self.n_beams = n_beams
+        self.n_beams = 100
         self.top_match = top_match
         self.peptide_mass_calculator = PeptideMass(
             self.residues
@@ -1815,27 +1815,28 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                     prev_output_tokens=tokens.unsqueeze(0),
                 )
                 insert_possible = torch.exp(mask_ins_score.squeeze(0))
-                sampled_length_indices = torch.multinomial(insert_possible, num_samples=self.n_beams, replacement=True).T
+                topK = min(5, self.n_beams)
+                sampled_length_indices = torch.multinomial(insert_possible, num_samples=topK, replacement=True).T
                 current_len = torch.sum(tokens != self.decoder.pad).item()
                 seq_len = current_len + sampled_length_indices.sum(dim=1)
                 max_length = seq_len.max().item()
-                output_tensor = torch.full((self.n_beams, max_length), self.decoder.unk, dtype=tokens.dtype, device=tokens.device)
+                output_tensor = torch.full((topK, max_length), self.decoder.unk, dtype=tokens.dtype, device=tokens.device)
 
-                bos_tokens = torch.full((self.n_beams, 1), self.decoder.bos, dtype=tokens.dtype, device=tokens.device)
-                bos_indices = torch.zeros((self.n_beams, 1), dtype=torch.long, device=tokens.device)
+                bos_tokens = torch.full((topK, 1), self.decoder.bos, dtype=tokens.dtype, device=tokens.device)
+                bos_indices = torch.zeros((topK, 1), dtype=torch.long, device=tokens.device)
                 output_tensor.scatter_(dim=1, index=bos_indices, src=bos_tokens)
 
                 tokens[mask_position] = self.decoder.unk
                 num_content_tokens = current_len - 2 
                 # src_content_tokens = original_token_batch[:, 1 : 1 + num_content_tokens]
-                base_indices = torch.arange(1, num_content_tokens + 1, device=tokens.device).expand(self.n_beams, -1)
+                base_indices = torch.arange(1, num_content_tokens + 1, device=tokens.device).expand(topK, -1)
                 insert_offsets = base_indices + torch.cumsum(sampled_length_indices[:, :num_content_tokens], dim=1)
-                output_tensor.scatter_(dim=1, index=insert_offsets, src=tokens[1:1 + num_content_tokens].expand(self.n_beams, -1))
+                output_tensor.scatter_(dim=1, index=insert_offsets, src=tokens[1:1 + num_content_tokens].expand(topK, -1))
 
                 eos_indices = (seq_len - 1).unsqueeze(1)
-                eos_tokens = torch.full((self.n_beams, 1), self.decoder.eos, dtype=tokens.dtype, device=tokens.device)
+                eos_tokens = torch.full((topK, 1), self.decoder.eos, dtype=tokens.dtype, device=tokens.device)
                 output_tensor.scatter_(dim=1, index=eos_indices, src=eos_tokens)
-                mask_indices = torch.arange(max_length, device=tokens.device).expand(self.n_beams, -1)
+                mask_indices = torch.arange(max_length, device=tokens.device).expand(topK, -1)
                 padding_mask = mask_indices >= seq_len.unsqueeze(1)
                 output_tensor[padding_mask] = self.decoder.pad
                 padded_original = F.pad(tokens, (0, max_length - len(tokens)), mode='constant', value=self.decoder.pad)
@@ -1851,15 +1852,15 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                     prev_output_tokens=output_tensor,
                 )
                 try:
-                    topv, topi = torch.topk(word_ins_score, k=self.n_beams, dim=-1)  # topv/topi: [B, T, 2]
+                    topv, topi = torch.topk(word_ins_score, k=topK*2, dim=-1)  # topv/topi: [B, T, 2]
                 except Exception as e:
                     print(f"n_spectra:{n_spectra}, word_ins_score.shape: {word_ins_score.shape}")
 
                 mask_position = (output_tensor == self.decoder.unk)
-                K = min(self.n_beams, topi.size(2))
                 # 复制 K 份原序列 -> [K, T]
+                K = max(self.n_beams, topi.size(2))
                 seqs = output_tensor.unsqueeze(1).repeat(1, K, 1)
-                sampled_indices = torch.randint(low=0, high=K, size=topi.shape, device=topi.device)
+                sampled_indices = torch.randint(low=0, high=topK*2, size=(topi.shape[0], topi.shape[1], K), device=seqs.device)
                 new_tokens = torch.gather(topi, 2, sampled_indices)
                 new_tokens_permuted = new_tokens.permute(0, 2, 1)
                 mask = mask_position.unsqueeze(1)
@@ -1868,12 +1869,14 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 # topi[true_idx] -> [M, K]，转置后是 [K, M]，与 seqs[:, true_idx] 的形状对齐
                 # seqs[:, true_idx] = topi[true_idx, :K].T
                 seqs = seqs.reshape(-1, seqs.size(-1))  # [B*K, T]
+                seqs = seqs.unique(dim=0)
                 B = len(seqs)
                 spec = batch[0][n_spectra]            # [n_peaks, 2]
                 spec_rep = spec.unsqueeze(0).expand(B, -1, -1)  # [B, n_peaks, 2]           
                 candidates = self.forward(spec_rep, batch[1][n_spectra].unsqueeze(0).expand(B, -1), prev_output_tokens=seqs)
                 candidates = [pred_dict for preds in candidates for pred_dict in preds]
                 candidate_tokens = [c["tokens"] for c in candidates]
+                # candidate_tokens.append(true_tokens)
                 candidate_tokens = pad_sequence(candidate_tokens, batch_first=True, padding_value=0)
                 candidate_tokens = torch.unique(candidate_tokens, dim=0)
                 mz_matched_candidates = []
