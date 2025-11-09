@@ -1779,8 +1779,8 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 precursors = batch[1]
                 real_mass = precursors[n_spectra][0]
                 predict_mass = self.peptide_mass_calculator.mass(pred_dict["sequence"])
-                mask_position = pred_dict["positional_scores"] < -0.20
-                th = torch.quantile(pred_dict["positional_scores"], 0.5)  # 10%分位
+                mask_position = pred_dict["positional_scores"] < -0.15
+                th = torch.quantile(pred_dict["positional_scores"], 0.7)  # 10%分位
                 dp_mask_position = pred_dict["positional_scores"] <= th
                 if _is_mass_match(real_mass, predict_mass):
                     peptides_pred.append(pred_dict["sequence"])
