@@ -135,11 +135,19 @@ num_sanity_val_steps: 0
 # This is expensive, so we recommend against it.
 calculate_precision: True
 
+# for training
 dual_training_for_deletion: False
 dual_training_for_insertion: False
 no_share_discriminator: False
 sampling_model_gen: 0.6
 
+# for inference
+# placeholder sampling number 
+top_k_for_mask_insert: 5
+# tokendecoder top_k
+top_k_for_word_insert: 10
+# tokendecoder sampling number
+sampling_num: 100
 
 tmp_dir: "/mnt/tmp"
 

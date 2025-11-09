@@ -276,6 +276,9 @@ class ModelRunner:
             dual_training_for_insertion=self.config.dual_training_for_insertion,
             no_share_discriminator=self.config.no_share_discriminator,
             sampling_model_gen=self.config.sampling_model_gen,
+            top_k_for_mask_insert=self.config.top_k_for_mask_insert,
+            top_k_for_word_insert=self.config.top_k_for_word_insert,
+            sampling_num=self.config.sampling_num
         )
 
         # Reconfigurable non-architecture related parameters for a loaded model.
@@ -300,6 +303,9 @@ class ModelRunner:
             calculate_precision=self.config.calculate_precision,
             max_decoder_iters=self.config.max_decoder_iters,
             sampling_model_gen=self.config.sampling_model_gen,
+            top_k_for_mask_insert=self.config.top_k_for_mask_insert,
+            top_k_for_word_insert=self.config.top_k_for_word_insert,
+            sampling_num=self.config.sampling_num
         )
 
         if self.model_filename is None:

@@ -222,7 +222,11 @@ class _PeptideTransformer(torch.nn.Module):
         if not partial:
             sequence += ["$"]
             sequence = ["&"] + sequence
-        tokens = [self._aa2idx[aa] for aa in sequence]
+        try:
+            tokens = [self._aa2idx[aa] for aa in sequence]
+        except Exception as e:
+            print(f"sequence:{sequence}")
+            raise  
         tokens = torch.tensor(tokens, device=self.device)
         return tokens
 

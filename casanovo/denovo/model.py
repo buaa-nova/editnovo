@@ -144,6 +144,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         no_share_discriminator: bool = False,
         dual_training_for_insertion: bool = False,
         sampling_model_gen: float = 0.3,
+        top_k_for_mask_insert: int = 5,
+        top_k_for_word_insert: int = 10,
+        sampling_num: int = 100,
         glc_prob: float = 0.5,
         **kwargs: Dict,
     ):
@@ -201,9 +204,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         self.isotope_error_range = isotope_error_range
         self.min_peptide_len = min_peptide_len
         self.n_beams = 100
-        self.top_k_for_mask_insert = 5
-        self.top_k_for_word_insert = 10
-        self.sampling_num = 100
+        self.top_k_for_mask_insert = top_k_for_mask_insert
+        self.top_k_for_word_insert = top_k_for_word_insert
+        self.sampling_num = sampling_num
         self.top_match = top_match
         self.peptide_mass_calculator = PeptideMass(
             self.residues
@@ -1782,6 +1785,8 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 precursors = batch[1]
                 real_mass = precursors[n_spectra][0]
                 predict_mass = self.peptide_mass_calculator.mass(pred_dict["sequence"])
+                if pred_dict["positional_scores"] is None:
+                    break
                 mask_position = pred_dict["positional_scores"] < -0.10
                 th = torch.quantile(pred_dict["positional_scores"], 0.7)
                 dp_mask_position = pred_dict["positional_scores"] <= th
@@ -1802,7 +1807,11 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
               
                 memory, memory_key_padding_mask = self.encoder(batch[0])
                 peptide2 = pred_dict["sequence"]
-                tokens = self.decoder.tokenize(peptide2)
+                try:
+                    tokens = self.decoder.tokenize(peptide2)
+                except Exception as e:
+                    logger.error("illegal results:%s", peptide2)
+                    break
                 dp_tokens = tokens.clone()
                 true_tokens = self.decoder.tokenize(peptide1)
                 pad_false = torch.tensor([False], device=tokens.device, dtype=torch.bool)
@@ -1935,6 +1944,10 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                         # dp, _, paths = self.find_possible_path(seqs[i], predict_delete_score[i], mask_position[i], batch[1][n_spectra, 2], batch[1][n_spectra, 1])
                         if paths is None:
                             continue
+                        L0, L1, L2, L3 = paths.shape
+                        if L0 < 0 or L1 < 0 or L2 < 100 or depth > L3:
+                            print(f"illegal, paths.shape: {paths.shape}, dephts: {depth}")
+                            break
                         for j in range (100):
                             if not torch.all(paths[-1, -1, j, :depth] == 0).item():
                                 cand = dp_output_tensor[i].clone()   
