@@ -1863,8 +1863,9 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                     encoder_out_mask=memory_key_padding_mask[n_spectra].unsqueeze(0).expand(batch_size, -1),
                     prev_output_tokens=output_tensor,
                 )
+                topK_for_word_ins = min(topK*2, word_ins_score.size(2) - 4)  # exclude unk, bos, eos, pad
                 try:
-                    topv, topi = torch.topk(word_ins_score, k=topK*2, dim=-1)  # topv/topi: [B, T, 2]
+                    topv, topi = torch.topk(word_ins_score, k=topK_for_word_ins, dim=-1)  # topv/topi: [B, T, 2]
                 except Exception as e:
                     print(f"n_spectra:{n_spectra}, word_ins_score.shape: {word_ins_score.shape}")
 
@@ -1875,7 +1876,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 # seqs = output_tensor.unsqueeze(1).repeat(1, K, 1)
                 # new_tokens_permuted = topi.permute(0, 2, 1)
                 seqs = output_tensor.unsqueeze(1).repeat(1, K, 1)
-                sampled_indices = torch.randint(low=0, high=topK*2, size=(topi.shape[0], topi.shape[1], K), device=seqs.device)
+                sampled_indices = torch.randint(low=0, high=topK_for_word_ins, size=(topi.shape[0], topi.shape[1], K), device=seqs.device)
                 new_tokens = torch.gather(topi, 2, sampled_indices)
                 new_tokens_permuted = new_tokens.permute(0, 2, 1)
                 mask = mask_position.unsqueeze(1)
@@ -1917,7 +1918,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                         prev_output_tokens=dp_output_tensor,
                     )
                     try:
-                        topv, topi = torch.topk(word_ins_score, k=topK*2, dim=-1)  # topv/topi: [B, T, 2]
+                        topv, topi = torch.topk(word_ins_score, k=topK_for_word_ins, dim=-1)  # topv/topi: [B, T, 2]
                     except Exception as e:
                         print(f"n_spectra:{n_spectra}, word_ins_score.shape: {word_ins_score.shape}")
                     dp_mask_position = (dp_output_tensor == self.decoder.unk)
