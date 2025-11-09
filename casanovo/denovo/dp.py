@@ -47,7 +47,7 @@ void inference(float* prob, int* ans, float* aa_masses, float* dp, float* dpMass
         int aa_index = aa_indexes[(h - 1) * ncandidates + i];
         float aa_mass = aa_masses[aa_index];
         int minw = int((w * grid_size - aa_masses[aa_index]) / grid_size);
-        if(minw >= 0 && minw <= int(premass)){
+        if(minw >= 0 && minw <= int(w * grid_size)){
             while(!atomicCAS(lock + minw * dim + h - 1, 1, 1));
             __threadfence();
             for (int k = 0 ; k < top_k; k++) {
@@ -76,7 +76,7 @@ void inference(float* prob, int* ans, float* aa_masses, float* dp, float* dpMass
             }
         }
         minw = minw + 1;
-        if(minw >= 0 && minw <= int(premass)){
+        if(minw >= 0 && minw <= int(w * grid_size)){
             while(!atomicCAS(lock + minw * dim + h - 1, 1, 1));
             __threadfence();
             for (int k = 0 ; k < top_k; k++) {
@@ -128,7 +128,7 @@ def knapsack_decode(prob: torch.Tensor, aa_indexes: torch.Tensor, aa_mass: torch
         dp_mass (torch.Tensor): The mass table corresponding to the dp table.
         pre_pathes_index (torch.Tensor): The indexes of previous amino acids for each position.
     """
-    s_torch = torch.cuda.Stream()
+    s_torch = torch.cuda.current_stream()
     s_cupy = cp.cuda.ExternalStream(s_torch.cuda_stream)
     with torch.cuda.stream(s_torch), cp.cuda.Stream(s_cupy):
         prob_cp = cp.asarray(prob) # shape (word_num, K)
