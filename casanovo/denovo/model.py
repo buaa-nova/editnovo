@@ -147,6 +147,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         top_k_for_mask_insert: int = 5,
         top_k_for_word_insert: int = 10,
         sampling_num: int = 100,
+        allow_sampling: bool = False,
         glc_prob: float = 0.5,
         **kwargs: Dict,
     ):
@@ -207,6 +208,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         self.top_k_for_mask_insert = top_k_for_mask_insert
         self.top_k_for_word_insert = top_k_for_word_insert
         self.sampling_num = sampling_num
+        self.allow_sampling = allow_sampling
         self.top_match = top_match
         self.peptide_mass_calculator = PeptideMass(
             self.residues
@@ -616,71 +618,6 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         return finished_beams, beam_fits_precursor, discard
 
         
-    # def replace_active_beams(
-    #     tokens: torch.Tensor,           # [B*S, T] 原 tokens
-    #     scores: torch.Tensor,           # [B*S, T] 原 scores 或聚合后[ B*S ]
-    #     finished_beams: torch.BoolTensor,# [B*S] 已完成标记
-    #     new_seqs: torch.LongTensor,     # [N_active, S, T]
-    #     new_scores: torch.Tensor,       # [N_active, S] 或 [N_active, S, T]
-    #     beam_size: int
-    # ) -> Tuple[torch.Tensor, torch.Tensor]:
-    #     """
-    #     用 new_seqs/new_scores 更新 tokens/scores 中所有 active beams，
-    #     并保证对每个样本只保留 beam_size 条最优 beam。
-    #     """
-    #     B = tokens.size(0) // beam_size
-    #     T = tokens.size(1)
-    #     device = tokens.device
-
-    #     # 1) 找到 active beams 的索引和对应样本 id
-    #     active = ~finished_beams                # [B*S]
-    #     all_indices = torch.arange(B * beam_size, device=device)
-    #     active_idx = all_indices[active]        # [N_active]
-    #     sample_id = active_idx // beam_size     # [N_active], 每个 active beam 属于哪个 sample
-
-    #     # 2) 把 new_seqs/scores 从 [N_active, S, ...] 摊平为 [N_active*S, ...]
-    #     flat_seqs   = new_seqs.reshape(-1, T)           # [N_active*S, T]
-    #     flat_scores = new_scores.reshape(-1, new_scores.size(-1))  # [N_active*S, T] 或 [N_active*S]
-
-    #     # 3) 为每个 sample 分组，并择优
-    #     #    我们将收集每个 sample 的所有 (flat_seqs, flat_scores, flat_idx)
-    #     best_seqs  = torch.empty_like(tokens)
-    #     best_scores= torch.empty_like(scores)
-
-    #     for b in range(B):
-    #         # 找到属于 sample b 的所有扁平 candidates
-    #         mask_b = (sample_id == b).nonzero(as_tuple=False).view(-1)
-    #         if mask_b.numel() == 0:
-    #             # 如果这个 sample 没 active beam，直接填原来那些 finished_beams
-    #             start = b * beam_size
-    #             best_seqs[start:start+beam_size]   = tokens[start:start+beam_size]
-    #             best_scores[start:start+beam_size] = scores[start:start+beam_size]
-    #             continue
-
-    #         # mask_b 中每个 i 对应 flat_seqs[i*S:(i+1)*S]
-    #         # 实际上 greedy_k_best_on_masks 已经按 beam_size 输出了最优 S 条，
-    #         # 所以第 i 条 active beam 展开后 flat_seqs 对应的 [i*S : i*S+S] 就是它的 S 条候选。
-    #         cand_seqs   = flat_seqs[mask_b.repeat_interleave(beam_size)*beam_size + torch.arange(beam_size, device=device)]
-    #         cand_scores = flat_scores[mask_b.repeat_interleave(beam_size)*beam_size + torch.arange(beam_size, device=device)]
-
-    #         # 4) 选出分数最高的 beam_size 条
-    #         #    先把 cand_scores 聚合为总分（如果是 per-pos，需要 sum）
-    #         if cand_scores.dim() == 2:
-    #             # cand_scores [N_can, T] -> 总分
-    #             total_scores = cand_scores.sum(dim=1)
-    #         else:
-    #             total_scores = cand_scores  # 已经是一维 [N_can]
-
-    #         topk_scores, topk_idx = torch.topk(total_scores, beam_size, largest=True)
-    #         chosen_seqs   = cand_seqs[topk_idx]
-    #         chosen_scores = cand_scores[topk_idx]
-
-    #         # 5) 写回 flat tokens/scores
-    #         base = b * beam_size
-    #         best_seqs[base:base+beam_size]   = chosen_seqs
-    #         best_scores[base:base+beam_size] = chosen_scores
-
-    #     return best_seqs, best_scores
     
 
     def forward(
@@ -745,15 +682,6 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 step, self.encoder, prev_decoder_out, precursors_embedding, memory, memory_key_padding_mask
             )
 
-            # if step == 0:
-            #     decoder_out.output_tokens[0, 1] = self.decoder.unk
-            #     decoder_out.output_tokens[0, 2] = 8
-            #     decoder_out = decoder_out._replace(
-            #         output_tokens=decoder_out.output_tokens,  # [B, 1]
-            #     )
-
-            # terminate if there is a loop
-            # terminated shape: (bsz, ) out_tokens shape: (bsz, L), out_scores shape: (bsz, L, V)
             terminated, out_tokens, out_scores, out_attn = is_a_loop(
                 prev_output_tokens,
                 decoder_out.output_tokens,
@@ -762,27 +690,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 padding_idx= self.decoder.pad,
             )
 
-            # force remove low confidence tokens if terminated, and turn terminated to False
-            # terminated, out_tokens, out_scores = self.remove_low_confidence(
-            #     terminated,
-            #     out_tokens,
-            #     out_scores,
-            #     precursor_mz=precursors[:, 2],
-            #     precursor_charge=precursors[:, 1],
-            #     ignore_ids=self.extra_ignored_ids
-            # )
-
-            # for i in range(out_tokens.size(0)):
-            #     pad_mask = torch.zeros_like(out_tokens[i], dtype=torch.bool)
-                
-            #     for pid in self.extra_ignored_ids:
-            #         pad_mask |= out_tokens[i].eq(pid)
-            #     non_ignore = ~pad_mask
-            #     tokens = out_tokens[i][non_ignore]  # 真实 token id 列表
-            #     seq = "".join(self.decoder.detokenize(tokens))
-            #     real_out_scores = out_scores[i][non_ignore]  # 真实 token 分数列表
-            #     print(f"Step {step}, len: {len(seq)}, terminated: {terminated[i].item()}, tokens: {seq}, scores: {real_out_scores}")
-            
+        
             decoder_out = decoder_out._replace(
                 output_tokens=out_tokens,
                 output_scores=out_scores,
@@ -824,180 +732,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             sent_idxs = sent_idxs[not_terminated.to(sent_idxs.device)]
             prev_output_tokens = prev_decoder_out.output_tokens.clone()
 
-        return finalized
-    
-    def remove_low_confidence(
-        self,
-        terminated: torch.BoolTensor,        # [bs]
-        prev_out_token: torch.LongTensor,    # [bs, T]
-        prev_out_score: torch.FloatTensor,   # [bs, T]
-        precursor_mz: torch.FloatTensor,     # [bs]
-        precursor_charge,  # [bs] 或 int
-        ignore_ids: Optional[Iterable[int]] = None
-    ) -> Tuple[torch.BoolTensor, torch.LongTensor, torch.FloatTensor]:
-        """
-        对已 terminated 的样本：
-        - 计算其 token 序列的质量 calc_mz;
-        - 如果 |calc_mz - precursor_mz| > self.precursor_mass_tol,
-            就在非 ignore_ids 的 token 中找到最低置信度那个,
-            从序列中物理删除（左侧压缩、末尾 pad)并将 terminated 复位为 False
-        - 否则该行不变。
-        其他未 terminated 行不变。始终返回 [bs,T] 形状的 Tensor。
-        """
-        bs, T = prev_out_token.shape
-        device = prev_out_token.device
-
-        # —— 0. 早退 —— 
-        if not terminated.any():
-            return terminated, prev_out_token, prev_out_score
-
-        # —— 1. 构造非 padding 掩码 —— 
-        ignore_ids = set(ignore_ids) if ignore_ids is not None else set()
-        if ignore_ids:
-            pad_mask = torch.zeros_like(prev_out_token, dtype=torch.bool)
-            for pid in ignore_ids:
-                pad_mask |= prev_out_token.eq(pid)
-            non_ignore = ~pad_mask
-            non_pad = prev_out_token.ne(self.decoder.pad)
-            
-        else:
-            non_pad = torch.ones_like(prev_out_token, dtype=torch.bool)
-
-        # —— 2. 选出“要清理”的行 —— 
-        # 条件：terminated 且 质量偏差超过 tol
-        # 先克隆输出
-        new_tokens = prev_out_token.clone()
-        new_scores = prev_out_score.clone()
-        new_terminated = terminated.clone()
-
-        # 仅遍历那些 terminated 行
-        idx = torch.nonzero(terminated, as_tuple=True)[0]
-        for i in idx:
-            # 提取第 i 行的有效 token 序列
-            tok_row = prev_out_token[i]        # [T]
-            valid = non_pad[i]                 # [T]
-            tokens = tok_row[non_ignore[i]]     # 真实 token id 列表
-            seq = "".join(self.decoder.detokenize(tokens))
-            # 计算该序列的质量
-            calc_mz = self.peptide_mass_calculator.mass(
-                seq=seq,
-                charge=precursor_charge[i]
-            )
-            delta_mass_ppm = [
-                _calc_mass_error(
-                    calc_mz,
-                    precursor_mz[i],
-                    precursor_charge[i],
-                    isotope,
-                )
-                for isotope in range(
-                    self.isotope_error_range[0],
-                    self.isotope_error_range[1] + 1,
-                )
-            ]
-            matches_precursor_mz = any(
-                abs(d) < self.precursor_mass_tol for d in delta_mass_ppm
-            )
-
-            if matches_precursor_mz:
-                continue  # 质量匹配,跳过该行
-
-            # 否则：找到最低置信度的非 padding token 的 index
-            sc_row = prev_out_score[i]  # [T]
-            # 给非 valid 或 pad 的位置设置 +∞,保证不会被选为最小
-            inf = torch.tensor(float("inf"), device=device)
-            sc_for_min = torch.where(valid, sc_row, inf)  # [T]
-            idx_min = torch.argmin(sc_for_min)            # 最低置信度位置
-# "".join(self.decoder.detokenize(tokens))
-            print(f"Remove low confidence token: {self.decoder.detokenize(tok_row[idx_min].view(1))}, score {sc_row[idx_min].item()}")
-            # 物理删除该位置：压缩左侧,末尾 pad
-            keep_mask = torch.ones(T, dtype=torch.bool, device=device)
-            keep_mask[idx_min] = False                   # 标记要删的位置
-            keep_mask &= valid                           # 只在原 valid 范围删
-
-            kept_tokens = tok_row[keep_mask]              # [L_i]
-            kept_scores = sc_row[keep_mask]               # [L_i]
-            L = kept_tokens.size(0)
-
-            # 重置整行
-            new_tokens[i].fill_(self.decoder.pad)
-            new_scores[i].zero_()
-            # 写回保留部分
-            new_tokens[i, :L] = kept_tokens
-            new_scores[i, :L] = kept_scores
-
-            # 复位 terminated
-            new_terminated[i] = False
-
-        return new_terminated, new_tokens, new_scores
-    
-    # def remove_low_confidence(
-    #     self,
-    #     terminated: torch.BoolTensor,        # [bs],标记哪些样本已经终止
-    #     prev_out_token: torch.LongTensor,    # [bs, T],上轮生成的 token id
-    #     prev_out_score: torch.FloatTensor,   # [bs, T],上轮生成的 token 对应的置信度（概率 / 分数）
-    #     threshold: float = 0.1,              # 置信度阈值,低于它的 token 要被清理
-    #     ignore_ids: Optional[Iterable[int]] = None  # 要当作“padding”跳过的 id 列表
-    # ) -> Tuple[torch.LongTensor, torch.FloatTensor, torch.BoolTensor]:
-      
-    #     """
-    #         只对 avg_score >= threshold 且 terminated == True 的行
-    #         删除低置信度 (< threshold 且非 ignore_ids) 的 token,
-    #         并将剩余 token 压缩到左侧、末尾填 pad_id；score 同理、空位填 0。
-    #         同时把这些样本的 terminated 复位为 False。
-    #         如果 terminated 全 False,直接返回原始 Tensor。
-    #     """
-    
-    #     # —— 0. 早退 —— 
-    #     if not terminated.any():
-    #         return terminated, prev_out_token, prev_out_score
-
-    #     # —— 1. 非 padding 掩码 —— 
-    #     ignore_ids = set(ignore_ids) if ignore_ids is not None else set()
-    #     if ignore_ids:
-    #         pad_mask = torch.zeros_like(prev_out_token, dtype=torch.bool)
-    #         for pid in ignore_ids:
-    #             pad_mask |= prev_out_token.eq(pid)
-    #         non_pad = ~pad_mask
-    #     else:
-    #         non_pad = torch.ones_like(prev_out_token, dtype=torch.bool)
-
-    #     # 2. 标记需清理的行：
-    #     #    在 terminated 且 存在至少一个 非 padding 且 score >= threshold 的位置 时触发
-    #     high_conf_exist = (prev_out_score < threshold) & non_pad        # [bs, T]
-    #     do_clean = terminated & high_conf_exist.any(dim=1)              # [bs]
-
-    #     if not do_clean.any():
-    #         return terminated, prev_out_token, prev_out_score, 
-
-    #     # —— 4. 复制并复位 terminated —— 
-    #     new_tokens = prev_out_token.clone()
-    #     new_scores = prev_out_score.clone()
-    #     new_terminated = terminated.clone()
-    #     new_terminated[do_clean] = False
-
-    #     # —— 5. 仅对要清理的行做压缩＋填充 —— 
-    #     idx = torch.nonzero(do_clean, as_tuple=True)[0]  # 需要清理的行索引
-    #     for i in idx:
-    #         tok_row = prev_out_token[i]    # [T]
-    #         sc_row = prev_out_score[i]     # [T]
-    #         valid = non_pad[i]             # [T]
-
-    #         # 保留：非 padding 且 score > threshold
-    #         keep_stay = valid & (sc_row > threshold)
-    #         kept_tokens = tok_row[keep_stay]    # [L_i]
-    #         kept_scores = sc_row[keep_stay]     # [L_i]
-    #         L = kept_tokens.size(0)
-
-    #         # 先把整行设成 pad / 0
-    #         new_tokens[i].fill_(self.decoder.pad)
-    #         new_scores[i].zero_()
-    #         # 再把保留部分写回左侧
-    #         new_tokens[i, :L] = kept_tokens
-    #         new_scores[i, :L] = kept_scores
-
-    #     return new_terminated, new_tokens, new_scores, 
-                    
+        return finalized      
 
 
 
@@ -1782,6 +1517,8 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             peptide1 = peptides_true[n_spectra]
             spectra_fill = False
             for pred_dict in spectrum_preds:
+                if not self.allow_sampling:
+                    break
                 precursors = batch[1]
                 real_mass = precursors[n_spectra][0]
                 predict_mass = self.peptide_mass_calculator.mass(pred_dict["sequence"])
@@ -1895,9 +1632,6 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 seqs = torch.where(mask, new_tokens_permuted, seqs)
                 mz_matched_candidates = []
                 
-                # 只在 true_idx 上回填，不改其他位置
-                # topi[true_idx] -> [M, K]，转置后是 [K, M]，与 seqs[:, true_idx] 的形状对齐
-                # seqs[:, true_idx] = topi[true_idx, :K].T
                 seqs = seqs.reshape(-1, seqs.size(-1))  # [B*K, T]
                 seqs = seqs.unique(dim=0)
                 B = len(seqs)
@@ -1906,7 +1640,6 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 candidates = self.forward(spec_rep, batch[1][n_spectra].unsqueeze(0).expand(B, -1), prev_output_tokens=seqs)
                 candidates = [pred_dict for preds in candidates for pred_dict in preds]
                 candidate_tokens = [c["tokens"] for c in candidates]
-                # candidate_tokens.append(true_tokens)
                 candidate_tokens = pad_sequence(candidate_tokens, batch_first=True, padding_value=0)
                 candidate_tokens = torch.unique(candidate_tokens, dim=0)
                 for token in seqs:
@@ -1941,19 +1674,13 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                     for i in range(dp_batch_size):
                         depth = dp_mask_position[i].sum()
                         _, _, paths = self.find_possible_path(seqs[i], topv[i].permute(1, 0), dp_mask_position[i], batch[1][n_spectra, 2], batch[1][n_spectra, 1], topK=100)
-                        # dp, _, paths = self.find_possible_path(seqs[i], predict_delete_score[i], mask_position[i], batch[1][n_spectra, 2], batch[1][n_spectra, 1])
                         if paths is None:
                             continue
-                        L0, L1, L2, L3 = paths.shape
-                        if L0 < 0 or L1 < 0 or L2 < 100 or depth > L3:
-                            print(f"illegal, paths.shape: {paths.shape}, dephts: {depth}")
-                            break
                         for j in range (100):
                             if not torch.all(paths[-1, -1, j, :depth] == 0).item():
                                 cand = dp_output_tensor[i].clone()   
                                 cand[dp_mask_position[i]] = paths[-1, -1, j, :depth].to(torch.int64)
                                 mz_matched_candidates.append(cand)
-                    # mz_matched_candidates.append(true_tokens)
 
                 if len(mz_matched_candidates) == 1:
                     peptide = self.decoder.detokenize(mz_matched_candidates[0])
