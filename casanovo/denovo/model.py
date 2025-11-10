@@ -1687,7 +1687,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                             _, _, paths = self.find_possible_path(seqs[i], topv[i].permute(1, 0), dp_mask_position[i], batch[1][n_spectra, 2], batch[1][n_spectra, 1], topK=100)
                             if paths is None:
                                 continue
-                            for j in range (100):
+                            for j in range (paths.size(2)):
                                 if not torch.all(paths[-1, -1, j, :depth] == 0).item():
                                     cand = dp_output_tensor[i].clone()   
                                     cand[dp_mask_position[i]] = paths[-1, -1, j, :depth].to(torch.int64)
