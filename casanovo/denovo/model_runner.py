@@ -278,7 +278,8 @@ class ModelRunner:
             sampling_model_gen=self.config.sampling_model_gen,
             top_k_for_mask_insert=self.config.top_k_for_mask_insert,
             top_k_for_word_insert=self.config.top_k_for_word_insert,
-            sampling_num=self.config.sampling_num
+            sampling_num=self.config.sampling_num,
+            allow_sampling=self.config.allow_sampling,
         )
 
         # Reconfigurable non-architecture related parameters for a loaded model.
@@ -305,7 +306,8 @@ class ModelRunner:
             sampling_model_gen=self.config.sampling_model_gen,
             top_k_for_mask_insert=self.config.top_k_for_mask_insert,
             top_k_for_word_insert=self.config.top_k_for_word_insert,
-            sampling_num=self.config.sampling_num
+            sampling_num=self.config.sampling_num,
+            allow_sampling=self.config.allow_sampling,
         )
 
         if self.model_filename is None:
