@@ -142,6 +142,7 @@ no_share_discriminator: False
 sampling_model_gen: 0.6
 
 # for inference
+allow_sampling: False
 # placeholder sampling number 
 top_k_for_mask_insert: 5
 # tokendecoder top_k
