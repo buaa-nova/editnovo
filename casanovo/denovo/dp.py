@@ -1,3 +1,4 @@
+import logging
 import cupy as cp
 import torch
 
@@ -8,13 +9,12 @@ void inference(float* prob, int* ans, float* aa_masses, float* dp, float* dpMass
     const int AA_num = 28;
     const float tol = tol2;
     const int word_num = length - 1;
-    int w = blockIdx.x;
-    int dim = blockDim.x;
-    int h = threadIdx.x;
+    unsigned int w = blockIdx.x;
+    unsigned int dim = blockDim.x;
+    unsigned int h = threadIdx.x;
     if(w == 0 || h == 0) return; // skip the first row and first column
 
-    float maxMass = aa_masses[AA_num - 8] * h;
-    int maxW = int(maxMass / grid_size);
+    unsigned int maxW = int(premass / grid_size);
     if(w > maxW){
         lock[w * dim + h] = 1;
         return;
@@ -22,6 +22,7 @@ void inference(float* prob, int* ans, float* aa_masses, float* dp, float* dpMass
     if(h == 1){
         for(int i = 0; i < ncandidates; i++){
             int aa_index = aa_indexes[(h - 1) * ncandidates + i];
+            if (aa_index <= 0 || aa_index > AA_num) continue;
             float aa_mass = aa_masses[aa_index];
             if(w == int(aa_mass / grid_size)){
                 int min_index = 0;
@@ -45,6 +46,7 @@ void inference(float* prob, int* ans, float* aa_masses, float* dp, float* dpMass
 
     for(int i = 0; i < ncandidates; i ++){
         int aa_index = aa_indexes[(h - 1) * ncandidates + i];
+        if (aa_index <= 0 || aa_index > AA_num) continue;
         float aa_mass = aa_masses[aa_index];
         int minw = int((w * grid_size - aa_masses[aa_index]) / grid_size);
         if(minw >= 0 && minw <= int(w * grid_size)){
@@ -139,6 +141,10 @@ def knapsack_decode(prob: torch.Tensor, aa_indexes: torch.Tensor, aa_mass: torch
         cell_num = int(premass / grid_size) + 1
         if cell_num < 1:
             return None, None, None
+        if cell_num * length * topk * word_num > (1 << 32) - 1:
+            logging.warning(f"DP table size exceeds limit: {cell_num * length * topk * word_num}")
+            topk = ((1<<32) - 1) // (cell_num * length * word_num)
+            logging.warning(f"Reducing topk to {topk} to fit in memory.")
 
         dp = cp.full((cell_num, length, topk), float("-inf"), dtype=cp.float32)
         dp_mass = cp.zeros((cell_num, length, topk), dtype=cp.float32)

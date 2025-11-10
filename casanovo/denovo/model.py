@@ -1513,224 +1513,235 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
             return abs_delta < 0.1
 
         n_spectra = 0
+
         for spectrum_preds in self.forward(batch[0], batch[1]):
-            peptide1 = peptides_true[n_spectra]
-            spectra_fill = False
-            for pred_dict in spectrum_preds:
-                if not self.allow_sampling:
-                    break
-                precursors = batch[1]
-                real_mass = precursors[n_spectra][0]
-                predict_mass = self.peptide_mass_calculator.mass(pred_dict["sequence"])
-                if pred_dict["positional_scores"] is None:
-                    break
-                mask_position = pred_dict["positional_scores"] < -0.10
-                th = torch.quantile(pred_dict["positional_scores"], 0.7)
-                dp_mask_position = pred_dict["positional_scores"] <= th
-                if dp_mask_position.sum() < mask_position.sum():
-                    dp_mask_position = mask_position.clone()
-                if _is_mass_match(real_mass, predict_mass):
+            if not self.allow_sampling:
+                for pred_dict in spectrum_preds:  
                     peptides_pred.append(pred_dict["sequence"])
                     steps.append(pred_dict["steps"])
                     if pred_dict["score"]:
-                        # scores.append(pred_dict["score"].cpu().detach().numpy())
-                        scores.append(-111)
+                        scores.append(pred_dict["score"].cpu().detach().numpy())
                         positional_scores.append(pred_dict["positional_scores"].cpu().detach().numpy())
                     else:
-                        scores.append(-10000)
+                        # avoid illegal data
+                        scores.append(-100000)
                         positional_scores.append([-10000])
-                    spectra_fill = True
-                    break
-              
-                memory, memory_key_padding_mask = self.encoder(batch[0])
-                peptide2 = pred_dict["sequence"]
-                try:
-                    tokens = self.decoder.tokenize(peptide2)
-                except Exception as e:
-                    logger.error("illegal results:%s", peptide2)
-                    break
-                dp_tokens = tokens.clone()
-                true_tokens = self.decoder.tokenize(peptide1)
-                pad_false = torch.tensor([False], device=tokens.device, dtype=torch.bool)
-                mask_position = torch.cat([pad_false, mask_position, pad_false], dim=0)
-                dp_mask_position = torch.cat([pad_false, dp_mask_position, pad_false], dim=0)
-                # Prepare mass and charge
-                masses = self.decoder.mass_encoder(batch[1][:, None, 0])
-                charges = self.decoder.charge_encoder(batch[1][:, 1].int() - 1)
-                precursors_embedding = masses + charges[:, None, :]
-
-                orginal_predict = copy.deepcopy(pred_dict)
-                # Try with insert postion filling
-                mask_ins_score, _ = self.decoder.forward_mask_ins(
-                    normalize=True,
-                    precurosors=precursors_embedding[n_spectra].unsqueeze(0),
-                    encoder_out=memory[n_spectra].unsqueeze(0),
-                    encoder_out_mask=memory_key_padding_mask[n_spectra].unsqueeze(0),
-                    prev_output_tokens=tokens.unsqueeze(0),
-                )
-                insert_possible = torch.exp(mask_ins_score.squeeze(0))
-                # Indexes are randomly sampled according to a given weight distribution.
-                sampled_length_indices = torch.multinomial(insert_possible, num_samples=self.top_k_for_mask_insert, replacement=True).T
-                current_len = torch.sum(tokens != self.decoder.pad).item()
-                seq_len = current_len + sampled_length_indices.sum(dim=1)
-                max_length = seq_len.max().item()
-                output_tensor = torch.full((self.top_k_for_mask_insert, max_length), self.decoder.unk, dtype=tokens.dtype, device=tokens.device)
+            else:
+                peptide1 = peptides_true[n_spectra]
+                spectra_fill = False
+                for pred_dict in spectrum_preds:
+                    precursors = batch[1]
+                    real_mass = precursors[n_spectra][0]
+                    predict_mass = self.peptide_mass_calculator.mass(pred_dict["sequence"])
+                    if pred_dict["positional_scores"] is None:
+                        break
+                    mask_position = pred_dict["positional_scores"] < -0.10
+                    th = torch.quantile(pred_dict["positional_scores"], 0.7)
+                    dp_mask_position = pred_dict["positional_scores"] <= th
+                    if dp_mask_position.sum() < mask_position.sum():
+                        dp_mask_position = mask_position.clone()
+                    if _is_mass_match(real_mass, predict_mass):
+                        peptides_pred.append(pred_dict["sequence"])
+                        steps.append(pred_dict["steps"])
+                        if pred_dict["score"]:
+                            # scores.append(pred_dict["score"].cpu().detach().numpy())
+                            scores.append(-111)
+                            positional_scores.append(pred_dict["positional_scores"].cpu().detach().numpy())
+                        else:
+                            scores.append(-10000)
+                            positional_scores.append([-10000])
+                        spectra_fill = True
+                        break
                 
-                bos_tokens = torch.full((self.top_k_for_mask_insert, 1), self.decoder.bos, dtype=tokens.dtype, device=tokens.device)
-                bos_indices = torch.zeros((self.top_k_for_mask_insert, 1), dtype=torch.long, device=tokens.device)
-                output_tensor.scatter_(dim=1, index=bos_indices, src=bos_tokens)
-                dp_output_tensor = output_tensor.clone()
-
-                tokens[mask_position] = self.decoder.unk
-                dp_tokens[dp_mask_position] = self.decoder.unk
-                num_content_tokens = current_len - 2 
-                # src_content_tokens = original_token_batch[:, 1 : 1 + num_content_tokens]
-                base_indices = torch.arange(1, num_content_tokens + 1, device=tokens.device).expand(self.top_k_for_mask_insert, -1)
-                insert_offsets = base_indices + torch.cumsum(sampled_length_indices[:, :num_content_tokens], dim=1)
-                output_tensor.scatter_(dim=1, index=insert_offsets, src=tokens[1:1 + num_content_tokens].expand(self.top_k_for_mask_insert, -1))
-                dp_output_tensor.scatter_(dim=1, index=insert_offsets, src=dp_tokens[1:1 + num_content_tokens].expand(self.top_k_for_mask_insert, -1))
-
-                eos_indices = (seq_len - 1).unsqueeze(1)
-                eos_tokens = torch.full((self.top_k_for_mask_insert, 1), self.decoder.eos, dtype=tokens.dtype, device=tokens.device)
-                output_tensor.scatter_(dim=1, index=eos_indices, src=eos_tokens)
-                dp_output_tensor.scatter_(dim=1, index=eos_indices, src=eos_tokens)
-                mask_indices = torch.arange(max_length, device=tokens.device).expand(self.top_k_for_mask_insert, -1)
-                padding_mask = mask_indices >= seq_len.unsqueeze(1)
-                output_tensor[padding_mask] = self.decoder.pad
-                dp_output_tensor[padding_mask] = self.decoder.pad
-                padded_original = F.pad(tokens, (0, max_length - len(tokens)), mode='constant', value=self.decoder.pad)
-                output_tensor = torch.cat((output_tensor, padded_original.unsqueeze(0)), dim=0)
-                dp_output_tensor = torch.cat((dp_output_tensor, padded_original.unsqueeze(0)), dim=0)
-                
-                output_tensor = output_tensor.unique(dim=0)
-                dp_output_tensor = dp_output_tensor.unique(dim=0)
-                batch_size = output_tensor.size(0)
-
-                word_ins_score, _ = self.decoder.forward_word_ins(
-                    normalize=True,
-                    precurosors=precursors_embedding[n_spectra].unsqueeze(0).expand(batch_size, -1, -1),
-                    encoder_out=memory[n_spectra].unsqueeze(0).expand(batch_size, -1, -1),
-                    encoder_out_mask=memory_key_padding_mask[n_spectra].unsqueeze(0).expand(batch_size, -1),
-                    prev_output_tokens=output_tensor,
-                )
-                topK_for_word_ins = self.top_k_for_word_insert
-                try:
-                    topv, topi = torch.topk(word_ins_score, k=topK_for_word_ins, dim=-1)  # topv/topi: [B, T, 2]
-                except Exception as e:
-                    print(f"n_spectra:{n_spectra}, word_ins_score.shape: {word_ins_score.shape}")
-
-                mask_position = (output_tensor == self.decoder.unk)
-                # 复制 K 份原序列 -> [K, T], random sampling for edit
-                K = max(self.sampling_num, topi.size(2))
-                # seqs = output_tensor.unsqueeze(1).repeat(1, K, 1)
-                # new_tokens_permuted = topi.permute(0, 2, 1)
-                seqs = output_tensor.unsqueeze(1).repeat(1, K, 1)
-                sampled_indices = torch.randint(low=0, high=topK_for_word_ins, size=(topi.shape[0], topi.shape[1], K), device=seqs.device)
-                new_tokens = torch.gather(topi, 2, sampled_indices)
-                new_tokens_permuted = new_tokens.permute(0, 2, 1)
-                mask = mask_position.unsqueeze(1)
-                seqs = torch.where(mask, new_tokens_permuted, seqs)
-                mz_matched_candidates = []
-                
-                seqs = seqs.reshape(-1, seqs.size(-1))  # [B*K, T]
-                seqs = seqs.unique(dim=0)
-                B = len(seqs)
-                spec = batch[0][n_spectra]            # [n_peaks, 2]
-                spec_rep = spec.unsqueeze(0).expand(B, -1, -1)  # [B, n_peaks, 2]           
-                candidates = self.forward(spec_rep, batch[1][n_spectra].unsqueeze(0).expand(B, -1), prev_output_tokens=seqs)
-                candidates = [pred_dict for preds in candidates for pred_dict in preds]
-                candidate_tokens = [c["tokens"] for c in candidates]
-                candidate_tokens = pad_sequence(candidate_tokens, batch_first=True, padding_value=0)
-                candidate_tokens = torch.unique(candidate_tokens, dim=0)
-                for token in seqs:
-                    seq = self.decoder.detokenize(token)
-                    if _is_mass_match(real_mass, self.peptide_mass_calculator.mass(seq)):
-                        mz_matched_candidates.append(token)
-                for token in candidate_tokens:
-                    seq = self.decoder.detokenize(token)
-                    if _is_mass_match(real_mass, self.peptide_mass_calculator.mass(seq)):
-                        mz_matched_candidates.append(token)
-                if True:
-                    dp_batch_size = dp_output_tensor.size(0)
-                    word_ins_score, _ = self.decoder.forward_word_ins(
-                        normalize=True,
-                        precurosors=precursors_embedding[n_spectra].unsqueeze(0).expand(dp_batch_size, -1, -1),
-                        encoder_out=memory[n_spectra].unsqueeze(0).expand(dp_batch_size, -1, -1),
-                        encoder_out_mask=memory_key_padding_mask[n_spectra].unsqueeze(0).expand(dp_batch_size, -1),
-                        prev_output_tokens=dp_output_tensor,
-                    )
+                    memory, memory_key_padding_mask = self.encoder(batch[0])
+                    peptide2 = pred_dict["sequence"]
                     try:
-                        topv, topi = torch.topk(word_ins_score, k=topK_for_word_ins, dim=-1)  # topv/topi: [B, T, 2]
+                        tokens = self.decoder.tokenize(peptide2)
                     except Exception as e:
-                        print(f"n_spectra:{n_spectra}, word_ins_score.shape: {word_ins_score.shape}")
-                    dp_mask_position = (dp_output_tensor == self.decoder.unk)
-                    # 复制 K 份原序列 -> [K, T], random sampling for edit
-                    K = min(self.sampling_num, topi.size(2))
-                    seqs = dp_output_tensor.unsqueeze(1).repeat(1, K, 1)
-                    new_tokens_permuted = topi.permute(0, 2, 1)
-                    mask = dp_mask_position.unsqueeze(1)
-                    seqs = torch.where(mask, new_tokens_permuted, seqs)
-                    # take  dp search
-                    for i in range(dp_batch_size):
-                        depth = dp_mask_position[i].sum()
-                        _, _, paths = self.find_possible_path(seqs[i], topv[i].permute(1, 0), dp_mask_position[i], batch[1][n_spectra, 2], batch[1][n_spectra, 1], topK=100)
-                        if paths is None:
-                            continue
-                        for j in range (100):
-                            if not torch.all(paths[-1, -1, j, :depth] == 0).item():
-                                cand = dp_output_tensor[i].clone()   
-                                cand[dp_mask_position[i]] = paths[-1, -1, j, :depth].to(torch.int64)
-                                mz_matched_candidates.append(cand)
+                        logger.error("illegal results:%s", peptide2)
+                        break
+                    dp_tokens = tokens.clone()
+                    true_tokens = self.decoder.tokenize(peptide1)
+                    pad_false = torch.tensor([False], device=tokens.device, dtype=torch.bool)
+                    mask_position = torch.cat([pad_false, mask_position, pad_false], dim=0)
+                    dp_mask_position = torch.cat([pad_false, dp_mask_position, pad_false], dim=0)
+                    # Prepare mass and charge
+                    masses = self.decoder.mass_encoder(batch[1][:, None, 0])
+                    charges = self.decoder.charge_encoder(batch[1][:, 1].int() - 1)
+                    precursors_embedding = masses + charges[:, None, :]
 
-                if len(mz_matched_candidates) == 1:
-                    peptide = self.decoder.detokenize(mz_matched_candidates[0])
-                    peptide = "".join(item for item in peptide if item not in {"$", "&", ""})
-                    peptides_pred.append(peptide)
-                    steps.append(0)
-                    scores.append(-222)
-                    positional_scores.append([-20000])
-                    spectra_fill = True
-                    break
-                if len(mz_matched_candidates) > 1:
-                    # mz_matched_candidates = torch.stack(mz_matched_candidates, dim=0)
-                    mz_matched_candidates = pad_sequence(mz_matched_candidates, batch_first=True, padding_value=self.decoder.pad)
-                    batch_size = mz_matched_candidates.size(0)
-                    mask = (mz_matched_candidates != self.decoder.bos) & (mz_matched_candidates != self.decoder.eos) & (mz_matched_candidates != self.decoder.pad)
-                    mask = mask.unsqueeze(-1)
-                    predic_delete, _ = self.decoder.forward_word_del(
+                    orginal_predict = copy.deepcopy(pred_dict)
+                    # Try with insert postion filling
+                    mask_ins_score, _ = self.decoder.forward_mask_ins(
+                        normalize=True,
+                        precurosors=precursors_embedding[n_spectra].unsqueeze(0),
+                        encoder_out=memory[n_spectra].unsqueeze(0),
+                        encoder_out_mask=memory_key_padding_mask[n_spectra].unsqueeze(0),
+                        prev_output_tokens=tokens.unsqueeze(0),
+                    )
+                    insert_possible = torch.exp(mask_ins_score.squeeze(0))
+                    # Indexes are randomly sampled according to a given weight distribution.
+                    sampled_length_indices = torch.multinomial(insert_possible, num_samples=self.top_k_for_mask_insert, replacement=True).T
+                    current_len = torch.sum(tokens != self.decoder.pad).item()
+                    seq_len = current_len + sampled_length_indices.sum(dim=1)
+                    max_length = seq_len.max().item()
+                    output_tensor = torch.full((self.top_k_for_mask_insert, max_length), self.decoder.unk, dtype=tokens.dtype, device=tokens.device)
+                    
+                    bos_tokens = torch.full((self.top_k_for_mask_insert, 1), self.decoder.bos, dtype=tokens.dtype, device=tokens.device)
+                    bos_indices = torch.zeros((self.top_k_for_mask_insert, 1), dtype=torch.long, device=tokens.device)
+                    output_tensor.scatter_(dim=1, index=bos_indices, src=bos_tokens)
+                    dp_output_tensor = output_tensor.clone()
+
+                    tokens[mask_position] = self.decoder.unk
+                    dp_tokens[dp_mask_position] = self.decoder.unk
+                    num_content_tokens = current_len - 2 
+                    # src_content_tokens = original_token_batch[:, 1 : 1 + num_content_tokens]
+                    base_indices = torch.arange(1, num_content_tokens + 1, device=tokens.device).expand(self.top_k_for_mask_insert, -1)
+                    insert_offsets = base_indices + torch.cumsum(sampled_length_indices[:, :num_content_tokens], dim=1)
+                    output_tensor.scatter_(dim=1, index=insert_offsets, src=tokens[1:1 + num_content_tokens].expand(self.top_k_for_mask_insert, -1))
+                    dp_output_tensor.scatter_(dim=1, index=insert_offsets, src=dp_tokens[1:1 + num_content_tokens].expand(self.top_k_for_mask_insert, -1))
+
+                    eos_indices = (seq_len - 1).unsqueeze(1)
+                    eos_tokens = torch.full((self.top_k_for_mask_insert, 1), self.decoder.eos, dtype=tokens.dtype, device=tokens.device)
+                    output_tensor.scatter_(dim=1, index=eos_indices, src=eos_tokens)
+                    dp_output_tensor.scatter_(dim=1, index=eos_indices, src=eos_tokens)
+                    mask_indices = torch.arange(max_length, device=tokens.device).expand(self.top_k_for_mask_insert, -1)
+                    padding_mask = mask_indices >= seq_len.unsqueeze(1)
+                    output_tensor[padding_mask] = self.decoder.pad
+                    dp_output_tensor[padding_mask] = self.decoder.pad
+                    padded_original = F.pad(tokens, (0, max_length - len(tokens)), mode='constant', value=self.decoder.pad)
+                    output_tensor = torch.cat((output_tensor, padded_original.unsqueeze(0)), dim=0)
+                    dp_output_tensor = torch.cat((dp_output_tensor, padded_original.unsqueeze(0)), dim=0)
+                    
+                    output_tensor = output_tensor.unique(dim=0)
+                    dp_output_tensor = dp_output_tensor.unique(dim=0)
+                    batch_size = output_tensor.size(0)
+
+                    word_ins_score, _ = self.decoder.forward_word_ins(
                         normalize=True,
                         precurosors=precursors_embedding[n_spectra].unsqueeze(0).expand(batch_size, -1, -1),
                         encoder_out=memory[n_spectra].unsqueeze(0).expand(batch_size, -1, -1),
                         encoder_out_mask=memory_key_padding_mask[n_spectra].unsqueeze(0).expand(batch_size, -1),
-                        prev_output_tokens=mz_matched_candidates,
+                        prev_output_tokens=output_tensor,
                     )
-                    # print(mz_matched_candidates)
-                    predic_delete = torch.where(mask, predic_delete, torch.nan)
-                    result = torch.nanmean(predic_delete, dim=1, keepdim=True)
-                    result = result[:, 0, 0]
-                    # print(result)
-                    max_score, max_idx = torch.max(result, dim=0)
-                    peptide = self.decoder.detokenize(mz_matched_candidates[max_idx])
-                    peptide = "".join(item for item in peptide if item not in {"$", "&", ""})
-                    peptides_pred.append(peptide)
-                    steps.append(0)
-                    scores.append(max_score.cpu().detach().numpy())
-                    positional_scores.append([-30000])
-                    spectra_fill = True
-                    # _, match = evaluate.aa_match(peptide1, peptide, self.decoder._peptide_mass.masses)
-                    # if not match:
-                    #     pass
-                    break
-            n_spectra += 1
-            if not spectra_fill:
-                peptides_pred.append(orginal_predict["sequence"])
-                steps.append(orginal_predict["steps"])
-                if pred_dict["score"]:
-                    scores.append(orginal_predict["score"].cpu().detach().numpy())
-                    positional_scores.append(orginal_predict["positional_scores"].cpu().detach().numpy())
-                else:
-                    scores.append(-100000)
-                    positional_scores.append([-10000])
+                    topK_for_word_ins = self.top_k_for_word_insert
+                    try:
+                        topv, topi = torch.topk(word_ins_score, k=topK_for_word_ins, dim=-1)  # topv/topi: [B, T, 2]
+                    except Exception as e:
+                        print(f"n_spectra:{n_spectra}, word_ins_score.shape: {word_ins_score.shape}")
+
+                    mask_position = (output_tensor == self.decoder.unk)
+                    # 复制 K 份原序列 -> [K, T], random sampling for edit
+                    K = max(self.sampling_num, topi.size(2))
+                    # seqs = output_tensor.unsqueeze(1).repeat(1, K, 1)
+                    # new_tokens_permuted = topi.permute(0, 2, 1)
+                    seqs = output_tensor.unsqueeze(1).repeat(1, K, 1)
+                    sampled_indices = torch.randint(low=0, high=topK_for_word_ins, size=(topi.shape[0], topi.shape[1], K), device=seqs.device)
+                    new_tokens = torch.gather(topi, 2, sampled_indices)
+                    new_tokens_permuted = new_tokens.permute(0, 2, 1)
+                    mask = mask_position.unsqueeze(1)
+                    seqs = torch.where(mask, new_tokens_permuted, seqs)
+                    mz_matched_candidates = []
+                    
+                    seqs = seqs.reshape(-1, seqs.size(-1))  # [B*K, T]
+                    seqs = seqs.unique(dim=0)
+                    B = len(seqs)
+                    spec = batch[0][n_spectra]            # [n_peaks, 2]
+                    spec_rep = spec.unsqueeze(0).expand(B, -1, -1)  # [B, n_peaks, 2]           
+                    candidates = self.forward(spec_rep, batch[1][n_spectra].unsqueeze(0).expand(B, -1), prev_output_tokens=seqs)
+                    candidates = [pred_dict for preds in candidates for pred_dict in preds]
+                    candidate_tokens = [c["tokens"] for c in candidates]
+                    candidate_tokens = pad_sequence(candidate_tokens, batch_first=True, padding_value=0)
+                    candidate_tokens = torch.unique(candidate_tokens, dim=0)
+                    for token in seqs:
+                        seq = self.decoder.detokenize(token)
+                        if _is_mass_match(real_mass, self.peptide_mass_calculator.mass(seq)):
+                            mz_matched_candidates.append(token)
+                    for token in candidate_tokens:
+                        seq = self.decoder.detokenize(token)
+                        if _is_mass_match(real_mass, self.peptide_mass_calculator.mass(seq)):
+                            mz_matched_candidates.append(token)
+                    if True:
+                        dp_batch_size = dp_output_tensor.size(0)
+                        word_ins_score, _ = self.decoder.forward_word_ins(
+                            normalize=True,
+                            precurosors=precursors_embedding[n_spectra].unsqueeze(0).expand(dp_batch_size, -1, -1),
+                            encoder_out=memory[n_spectra].unsqueeze(0).expand(dp_batch_size, -1, -1),
+                            encoder_out_mask=memory_key_padding_mask[n_spectra].unsqueeze(0).expand(dp_batch_size, -1),
+                            prev_output_tokens=dp_output_tensor,
+                        )
+                        try:
+                            topv, topi = torch.topk(word_ins_score, k=topK_for_word_ins, dim=-1)  # topv/topi: [B, T, 2]
+                        except Exception as e:
+                            print(f"n_spectra:{n_spectra}, word_ins_score.shape: {word_ins_score.shape}")
+                        dp_mask_position = (dp_output_tensor == self.decoder.unk)
+                        # 复制 K 份原序列 -> [K, T], random sampling for edit
+                        K = min(self.sampling_num, topi.size(2))
+                        seqs = dp_output_tensor.unsqueeze(1).repeat(1, K, 1)
+                        new_tokens_permuted = topi.permute(0, 2, 1)
+                        mask = dp_mask_position.unsqueeze(1)
+                        seqs = torch.where(mask, new_tokens_permuted, seqs)
+                        # take  dp search
+                        for i in range(dp_batch_size):
+                            depth = dp_mask_position[i].sum()
+                            _, _, paths = self.find_possible_path(seqs[i], topv[i].permute(1, 0), dp_mask_position[i], batch[1][n_spectra, 2], batch[1][n_spectra, 1], topK=100)
+                            if paths is None:
+                                continue
+                            for j in range (100):
+                                if not torch.all(paths[-1, -1, j, :depth] == 0).item():
+                                    cand = dp_output_tensor[i].clone()   
+                                    cand[dp_mask_position[i]] = paths[-1, -1, j, :depth].to(torch.int64)
+                                    mz_matched_candidates.append(cand)
+
+                    if len(mz_matched_candidates) == 1:
+                        peptide = self.decoder.detokenize(mz_matched_candidates[0])
+                        peptide = "".join(item for item in peptide if item not in {"$", "&", ""})
+                        peptides_pred.append(peptide)
+                        steps.append(0)
+                        scores.append(-222)
+                        positional_scores.append([-20000])
+                        spectra_fill = True
+                        break
+                    if len(mz_matched_candidates) > 1:
+                        # mz_matched_candidates = torch.stack(mz_matched_candidates, dim=0)
+                        mz_matched_candidates = pad_sequence(mz_matched_candidates, batch_first=True, padding_value=self.decoder.pad)
+                        batch_size = mz_matched_candidates.size(0)
+                        mask = (mz_matched_candidates != self.decoder.bos) & (mz_matched_candidates != self.decoder.eos) & (mz_matched_candidates != self.decoder.pad)
+                        mask = mask.unsqueeze(-1)
+                        predic_delete, _ = self.decoder.forward_word_del(
+                            normalize=True,
+                            precurosors=precursors_embedding[n_spectra].unsqueeze(0).expand(batch_size, -1, -1),
+                            encoder_out=memory[n_spectra].unsqueeze(0).expand(batch_size, -1, -1),
+                            encoder_out_mask=memory_key_padding_mask[n_spectra].unsqueeze(0).expand(batch_size, -1),
+                            prev_output_tokens=mz_matched_candidates,
+                        )
+                        # print(mz_matched_candidates)
+                        predic_delete = torch.where(mask, predic_delete, torch.nan)
+                        result = torch.nanmean(predic_delete, dim=1, keepdim=True)
+                        result = result[:, 0, 0]
+                        # print(result)
+                        max_score, max_idx = torch.max(result, dim=0)
+                        peptide = self.decoder.detokenize(mz_matched_candidates[max_idx])
+                        peptide = "".join(item for item in peptide if item not in {"$", "&", ""})
+                        peptides_pred.append(peptide)
+                        steps.append(0)
+                        scores.append(max_score.cpu().detach().numpy())
+                        positional_scores.append([-30000])
+                        spectra_fill = True
+                        # _, match = evaluate.aa_match(peptide1, peptide, self.decoder._peptide_mass.masses)
+                        # if not match:
+                        #     pass
+                        break
+                n_spectra += 1
+                if not spectra_fill:
+                    peptides_pred.append(orginal_predict["sequence"])
+                    steps.append(orginal_predict["steps"])
+                    if pred_dict["score"]:
+                        scores.append(orginal_predict["score"].cpu().detach().numpy())
+                        positional_scores.append(orginal_predict["positional_scores"].cpu().detach().numpy())
+                    else:
+                        scores.append(-100000)
+                        positional_scores.append([-10000])
 
         # logger.info("Peptide_true | Peptide_predict |Steps |  Full_match | Match_count | n_aa1 | n_aa2")
         aa_precision, _, pep_precision = evaluate.aa_match_metrics(
