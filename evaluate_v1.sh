@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# export CUDA_VISIBLE_DEVICES=0
-export CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7  # Use GPU 2
+# export CUDA_VISIBLE_DEVICES=2
+# export CUDA_VISIBLE_DEVICES=0  # Use GPU 2
 # Directory containing your .mgf files
-# mgf_file="/root/data/dda-train-data/nine-species-v1/Casanovo_preprocessed_data/preproc.high.human.PXD004424.mgf"
-mgf_file="/root/data/dda-train-data/nine-species-v1/Casanovo_preprocessed_data/preproc.high.ricebean.PXD005025.mgf"
+mgf_file="/root/data/dda-train-data/nine-species-v1/Casanovo_preprocessed_data/preproc.high.clambacteria.PXD004536.mgf"
+# mgf_file="/root/data/dda-train-data/nine-species-v1/Casanovo_preprocessed_data/preproc.high.ricebean.PXD005025.mgf"
 # mgf_file="/root/attennovo/output_E_Coli.with_seq.mgf"
 # DATA_DIR="/root/data/dda-train-data/revised_nine_species/9speciesbenchmark/Solanum-lycopersicum"
 # # DATA_DIR="/root/data/dda-train-data/nine-species-v1/Casanovo_preprocessed_data/preproc.high.bacillus.PXD004565.mgf"

@@ -1530,7 +1530,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 peptide1 = peptides_true[n_spectra]
                 spectra_fill = False
                 for pred_dict in spectrum_preds:
-                    orginal_predict = copy.deepcopy(pred_dict)
+                    orginal_predict = pred_dict.copy()
                     precursors = batch[1]
                     real_mass = precursors[n_spectra][0]
                     predict_mass = self.peptide_mass_calculator.mass(pred_dict["sequence"])
