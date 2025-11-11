@@ -1530,6 +1530,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                 peptide1 = peptides_true[n_spectra]
                 spectra_fill = False
                 for pred_dict in spectrum_preds:
+                    orginal_predict = copy.deepcopy(pred_dict)
                     precursors = batch[1]
                     real_mass = precursors[n_spectra][0]
                     predict_mass = self.peptide_mass_calculator.mass(pred_dict["sequence"])
@@ -1569,8 +1570,7 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
                     masses = self.decoder.mass_encoder(batch[1][:, None, 0])
                     charges = self.decoder.charge_encoder(batch[1][:, 1].int() - 1)
                     precursors_embedding = masses + charges[:, None, :]
-
-                    orginal_predict = copy.deepcopy(pred_dict)
+               
                     # Try with insert postion filling
                     mask_ins_score, _ = self.decoder.forward_mask_ins(
                         normalize=True,
