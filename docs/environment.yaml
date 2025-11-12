@@ -1,4 +1,4 @@
-name: casanovo-docs
+name: editnovo-docs
 channels:
   - bioconda
   - conda-forge

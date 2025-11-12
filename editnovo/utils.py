@@ -10,7 +10,7 @@ import psutil
 import torch
 
 
-logger = logging.getLogger("casanovo")
+logger = logging.getLogger("editnovo")
 
 
 def n_workers() -> int:

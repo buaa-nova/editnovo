@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-from casanovo.config import Config
-from casanovo.denovo.model_runner import ModelRunner
+from editnovo.config import Config
+from editnovo.denovo.model_runner import ModelRunner
 
 
 def test_initialize_model(tmp_path, mgf_small):

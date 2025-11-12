@@ -25,7 +25,7 @@ from ..denovo.dataloaders import DeNovoDataModule
 from ..denovo.model import Spec2Pep
 
 
-logger = logging.getLogger("casanovo")
+logger = logging.getLogger("editnovo")
 
 # Enable TensorFloat-32 (TF32) on supported hardware (Ampere+ GPUs).
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -37,12 +37,12 @@ torch.set_float32_matmul_precision("high")
 
 
 class ModelRunner:
-    """A class to run Casanovo models.
+    """A class to run editnovo models.
 
     Parameters
     ----------
     config : Config object
-        The casanovo configuration.
+        The editnovo configuration.
     model_filename : str, optional
         The model filename is required for eval and de novo modes,
         but not for training a model from scratch.
@@ -94,7 +94,7 @@ class ModelRunner:
         train_peak_path: Iterable[str],
         valid_peak_path: Iterable[str],
     ) -> None:
-        """Train the Casanovo model.
+        """Train the editnovo model.
 
         Parameters
         ----------
@@ -122,7 +122,6 @@ class ModelRunner:
             except Exception as e:
                 logger.error("Failed to copy file: %s", str(e))
         
-
         valid_index = self._get_index(valid_peak_path, True, "validation")
         logger.info("valid_index:%s", valid_index.path)
         if self.config.dump_hdf5 and pl.utilities.rank_zero.rank_zero_only.rank == 0:
@@ -133,7 +132,6 @@ class ModelRunner:
                 logger.info("File copied to: %s", destination_path)
             except Exception as e:
                 logger.error("Failed to copy file: %s", str(e))
-        
         self.initialize_data_module(train_index, valid_index)
         self.loaders.setup()
         if self.config.force_load_from_checkpoint:
@@ -149,7 +147,7 @@ class ModelRunner:
         )
 
     def evaluate(self, peak_path: Iterable[str]) -> None:
-        """Evaluate peptide sequence preditions from a trained Casanovo model.
+        """Evaluate peptide sequence preditions from a trained editnovo model.
 
         Parameters
         ----------
@@ -166,11 +164,10 @@ class ModelRunner:
         test_index = self._get_index(peak_path, True, "evaluation")
         self.initialize_data_module(test_index=test_index)
         self.loaders.setup(stage="test", annotated=True)
-
         self.trainer.validate(self.model, self.loaders.test_dataloader())
 
     def predict(self, peak_path: Iterable[str], output: str) -> None:
-        """Predict peptide sequences with a trained Casanovo model.
+        """Predict peptide sequences with a trained editnovo model.
 
         Parameters
         ----------
@@ -238,7 +235,7 @@ class ModelRunner:
         self.trainer = pl.Trainer(**trainer_cfg)
 
     def initialize_model(self, train: bool) -> None:
-        """Initialize the Casanovo model.
+        """Initialize the editnovo model.
 
         Parameters
         ----------
@@ -364,7 +361,7 @@ class ModelRunner:
                 except RuntimeError:
                     raise RuntimeError(
                         "Weights file incompatible with the current version of "
-                        "Casanovo."
+                        "editnovo."
                     )
         else:
             # Default behavior for training: Create model from scratch and let trainer.fit() handle checkpoint loading

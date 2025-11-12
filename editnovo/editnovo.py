@@ -1,4 +1,4 @@
-"""The command line entry point for Casanovo."""
+"""The command line entry point for editnovo."""
 
 import datetime
 import functools
@@ -43,14 +43,14 @@ from . import utils
 from .denovo import ModelRunner
 from .config import Config
 
-logger = logging.getLogger("casanovo")
+logger = logging.getLogger("editnovo")
 click.rich_click.USE_MARKDOWN = True
 click.rich_click.STYLE_HELPTEXT = ""
 click.rich_click.SHOW_ARGUMENTS = True
 
 
 class _SharedParams(click.RichCommand):
-    """Options shared between most Casanovo commands"""
+    """Options shared between most editnovo commands"""
 
     def __init__(self, *args, **kwargs) -> None:
         """Define shared options."""
@@ -59,7 +59,7 @@ class _SharedParams(click.RichCommand):
             click.Option(
                 ("-m", "--model"),
                 help="""
-                The model weights (.ckpt file). If not provided, Casanovo
+                The model weights (.ckpt file). If not provided, editnovo
                 will try to download the latest release.
                 """,
                 type=click.Path(exists=True, dir_okay=False),
@@ -93,27 +93,18 @@ class _SharedParams(click.RichCommand):
 
 @click.group(context_settings=dict(help_option_names=["-h", "--help"]))
 def main() -> None:
-    """# Casanovo
+    """# editnovo
 
-    Casanovo is a state-of-the-art deep learning tool designed for de
+    editnovo is a state-of-the-art deep learning tool designed for de
     novo peptide sequencing. Powered by a transformer neural network,
-    Casanovo "translates" peaks in MS/MS spectra into amino acid
+    editnovo "translates" peaks in MS/MS spectra into amino acid
     sequences.
 
     Links:
-    - Documentation: [https://casanovo.readthedocs.io]()
-    - Official code repository: [https://github.com/Noble-Lab/casanovo]()
+    - Official code repository: [https://github.com/buaa-nova/editnovo]()
 
-    If you use Casanovo in your work, please cite:
-    - Yilmaz, M., Fondrie, W. E., Bittremieux, W., Oh, S. & Noble, W. S.
-    De novo mass spectrometry peptide sequencing with a transformer
-    model. Proceedings of the 39th International Conference on Machine
-    Learning - ICML '22 (2022).
-    [https://proceedings.mlr.press/v162/yilmaz22a.html]().
-
-    For more information on how to cite different versions of Casanovo,
-    please see [https://casanovo.readthedocs.io/en/latest/cite.html]().
-
+    If you use editnovo in your work, please cite:
+   
     """
     return
 
@@ -207,7 +198,7 @@ def train(
     output: Optional[str],
     verbosity: str,
 ) -> None:
-    """Train a Casanovo model on your own data.
+    """Train a editnovo model on your own data.
 
     TRAIN_PEAK_PATH must be one or more annoated MGF files, such as those
     provided by MassIVE-KB, from which to train a new Casnovo model.
@@ -231,9 +222,9 @@ def train(
 
 @main.command()
 def version() -> None:
-    """Get the Casanovo version information"""
+    """Get the editnovo version information"""
     versions = [
-        f"Casanovo: {__version__}",
+        f"editnovo: {__version__}",
         f"Depthcharge: {depthcharge.__version__}",
         f"Lightning: {lightning.__version__}",
         f"PyTorch: {torch.__version__}",
@@ -246,13 +237,13 @@ def version() -> None:
     "-o",
     "--output",
     help="The output configuration file.",
-    default="casanovo.yaml",
+    default="editnovo.yaml",
     type=click.Path(dir_okay=False),
 )
 def configure(output: str) -> None:
-    """Generate a Casanovo configuration file to customize.
+    """Generate a editnovo configuration file to customize.
 
-    The casanovo configuration file is in the YAML format.
+    The editnovo configuration file is in the YAML format.
     """
     Config.copy_default(output)
     output = setup_logging(output, "info")
@@ -280,7 +271,7 @@ def setup_logging(
         The output file path.
     """
     if output is None:
-        output = f"casanovo_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+        output = f"editnovo_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
 
     output = Path(output).expanduser().resolve()
 
@@ -336,7 +327,7 @@ def setup_model(
     output: Optional[Path],
     is_train: bool,
 ) -> Config:
-    """Setup Casanovo for most commands.
+    """Setup editnovo for most commands.
 
     Parameters
     ----------
@@ -367,10 +358,10 @@ def setup_model(
             logger.error(
                 "GitHub API rate limit exceeded while trying to download the "
                 "model weights. Please download compatible model weights "
-                "manually from the official Casanovo code website "
-                "(https://github.com/Noble-Lab/casanovo) and specify these "
+                "manually from the official editnovo code website "
+                "(https://github.com/buaa-nova/editnovo) and specify these "
                 "explicitly using the `--model` parameter when running "
-                "Casanovo."
+                "editnovo."
             )
             raise PermissionError(
                 "GitHub API rate limit exceeded while trying to download the "
@@ -378,7 +369,7 @@ def setup_model(
             ) from None
 
     # Log the active configuration.
-    logger.info("Casanovo version %s", str(__version__))
+    logger.info("editnovo version %s", str(__version__))
     logger.debug("model = %s", model)
     logger.debug("config = %s", config.file)
     logger.debug("output = %s", output)
@@ -407,7 +398,7 @@ def _get_model_weights() -> str:
     str
         The name of the model weights file.
     """
-    cache_dir = appdirs.user_cache_dir("casanovo", False, opinion=False)
+    cache_dir = appdirs.user_cache_dir("editnovo", False, opinion=False)
     os.makedirs(cache_dir, exist_ok=True)
     version = utils.split_version(__version__)
     version_match: Tuple[Optional[str], Optional[str], int] = None, None, 0
@@ -434,7 +425,7 @@ def _get_model_weights() -> str:
         return version_match[0]
     # Otherwise try to find compatible model weights on GitHub.
     else:
-        repo = github.Github().get_repo("Noble-Lab/casanovo")
+        repo = github.Github().get_repo("buaa-nova/editnovo")
         # Find the best matching release with model weights provided as asset.
         for release in repo.get_releases():
             rel_version = tuple(

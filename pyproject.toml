@@ -3,7 +3,7 @@ requires = ["setuptools>=61", "wheel", "setuptools_scm[toml]>=3.4"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "casanovo"
+name = "editnovo"
 authors = [
     {name = "Melih Yilmaz", email = "melih@cs.washington.edu"},
     {name = "William E. Fondrie", email = "fondriew@gmail.com"},
@@ -44,10 +44,10 @@ file = "README.md"
 content-type = "text/markdown"
 
 [project.urls]
-Homepage = "https://github.com/Noble-Lab/casanovo"
-Documentation = "https://casanovo.readthedocs.io"
-"Bug Tracker" = "https://github.com/Noble-Lab/casanovo/issues"
-"Discussion Board" = "https://github.com/Noble-Lab/casanovo/discussions"
+Homepage = "https://github.com/Noble-Lab/editnovo"
+Documentation = "https://editnovo.readthedocs.io"
+"Bug Tracker" = "https://github.com/Noble-Lab/editnovo/issues"
+"Discussion Board" = "https://github.com/Noble-Lab/editnovo/discussions"
 
 [project.optional-dependencies]
 docs = [
@@ -65,7 +65,7 @@ dev = [
 ]
 
 [project.scripts]
-casanovo = "casanovo.casanovo:main"
+editnovo = "editnovo.editnovo:main"
 
 [tool.setuptools]
 include-package-data = true

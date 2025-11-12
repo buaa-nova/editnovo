@@ -10,7 +10,7 @@ import yaml
 
 from . import utils
 
-logger = logging.getLogger("casanovo")
+logger = logging.getLogger("editnovo")
 
 
 # FIXME: This contains deprecated config options to be removed in the next major
@@ -23,7 +23,7 @@ _config_deprecated = dict(
 
 
 class Config:
-    """The Casanovo configuration options.
+    """The editnovo configuration options.
 
     If a parameter is missing from a user's configuration file, the default
     value is assumed.
@@ -36,7 +36,7 @@ class Config:
     Examples
     --------
     ```
-    config = Config("casanovo.yaml")
+    config = Config("editnovo.yaml")
     config.n_peaks    # the n_peaks parameter
     config["n_peaks"] # also the n_peaks parameter
     ```
@@ -141,7 +141,7 @@ class Config:
         Parameters
         ----------
         param : str
-            The Casanovo parameter
+            The editnovo parameter
         param_type : Callable
             The expected callable type of the parameter.
         """

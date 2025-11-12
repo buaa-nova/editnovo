@@ -68,7 +68,7 @@ def get_activation_fn(activation: str) -> Callable:
 
 def load_libnat():
     try:
-        from casanovo import libnat_cuda
+        from editnovo import libnat_cuda
 
         return libnat_cuda, True
 
@@ -76,7 +76,7 @@ def load_libnat():
         print(str(e) + "... fall back to CPU version")
 
         try:
-            from casanovo import libnat
+            from editnovo import libnat
 
             return libnat, False
 

@@ -3,13 +3,16 @@ set -euo pipefail
 # export CUDA_VISIBLE_DEVICES=2
 # export CUDA_VISIBLE_DEVICES=0  # Use GPU 2
 # Directory containing your .mgf files
-mgf_file="/root/data/dda-train-data/nine-species-v1/Casanovo_preprocessed_data/preproc.high.clambacteria.PXD004536.mgf"
-# mgf_file="/root/data/dda-train-data/nine-species-v1/Casanovo_preprocessed_data/preproc.high.ricebean.PXD005025.mgf"
+# mgf_file="/root/data/dda-train-data/nine-species-v1/Casanovo_preprocessed_data/preproc.high.human.PXD004424.mgf"
+mgf_file="/root/data/dda-train-data/nine-species-v1/Casanovo_preprocessed_data/preproc.high.ricebean.PXD005025.mgf"
 # mgf_file="/root/attennovo/output_E_Coli.with_seq.mgf"
 # DATA_DIR="/root/data/dda-train-data/revised_nine_species/9speciesbenchmark/Solanum-lycopersicum"
-# # DATA_DIR="/root/data/dda-train-data/nine-species-v1/Casanovo_preprocessed_data/preproc.high.bacillus.PXD004565.mgf"
+# # DATA_DIR="/root/data/dda-train-data/nine-species-v1/editnovo_preprocessed_data/preproc.high.bacillus.PXD004565.mgf"
 # # DATA_DIR="/root/data/dda-train-data/nine-species-main-test-sample"
-python -m casanovo.casanovo evaluate "$mgf_file" -m "/root/data/attennovo/epoch=10-step=294000-703.ckpt"
+python -m editnovo.editnovo evaluate "$mgf_file" -m "/root/data/attennovo/epoch=10-step=294000-703.ckpt"
+python -m editnovo.editnovo train ./sample_preprocessed_spectra.mgf -p ./sample_preprocessed_spectra.mgf 
+python -m editnovo.editnovo evaluate ./sample_preprocessed_spectra.mgf -m ./editnovo-massive-kb.ckpt
+CUDA_VISIBLE_DEVICES=0  python -m editnovo.editnovo evaluate ./sample_preprocessed_spectra.mgf -m ./editnovo-massive-kb.ckpt
 # # Checkpoint to use
 # CKPT="/root/data/attennovo/epoch=9-step=273000-689.ckpt"
 
@@ -24,4 +27,4 @@ python -m casanovo.casanovo evaluate "$mgf_file" -m "/root/data/attennovo/epoch=
 
 
 # # Run evaluation with each file explicitly listed
-# python -m casanovo.casanovo evaluate "${mgf_files[@]}" -m "$CKPT"
+# python -m editnovo.editnovo evaluate "${mgf_files[@]}" -m "$CKPT"

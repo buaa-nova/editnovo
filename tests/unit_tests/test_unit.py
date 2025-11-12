@@ -11,18 +11,18 @@ import numpy as np
 import pytest
 import torch
 
-from casanovo import casanovo
-from casanovo import utils
-from casanovo.data import ms_io
-from casanovo.data.datasets import SpectrumDataset, AnnotatedSpectrumDataset
-from casanovo.denovo.evaluate import aa_match_batch, aa_match_metrics
-from casanovo.denovo.model import Spec2Pep, _aa_pep_score
+from editnovo import editnovo
+from editnovo import utils
+from editnovo.data import ms_io
+from editnovo.data.datasets import SpectrumDataset, AnnotatedSpectrumDataset
+from editnovo.denovo.evaluate import aa_match_batch, aa_match_metrics
+from editnovo.denovo.model import Spec2Pep, _aa_pep_score
 from depthcharge.data import SpectrumIndex, AnnotatedSpectrumIndex
 
 
 def test_version():
     """Check that the version is not None."""
-    assert casanovo.__version__ is not None
+    assert editnovo.__version__ is not None
 
 
 def test_n_workers(monkeypatch):
@@ -79,24 +79,24 @@ def test_get_model_weights(monkeypatch):
     # matching version.
     for version in ["3.0.0", "3.0.999", "3.999.999"]:
         with monkeypatch.context() as mnk, tempfile.TemporaryDirectory() as tmp_dir:
-            mnk.setattr(casanovo, "__version__", version)
+            mnk.setattr(editnovo, "__version__", version)
             mnk.setattr(
                 "appdirs.user_cache_dir", lambda n, a, opinion: tmp_dir
             )
 
-            filename = os.path.join(tmp_dir, "casanovo_massivekb_v3_0_0.ckpt")
+            filename = os.path.join(tmp_dir, "editnovo_massivekb_v3_0_0.ckpt")
             assert not os.path.isfile(filename)
-            assert casanovo._get_model_weights() == filename
+            assert editnovo._get_model_weights() == filename
             assert os.path.isfile(filename)
-            assert casanovo._get_model_weights() == filename
+            assert editnovo._get_model_weights() == filename
 
     # Impossible to find model weights for (i) full version mismatch and (ii)
     # major version mismatch.
     for version in ["999.999.999", "999.0.0"]:
         with monkeypatch.context() as mnk:
-            mnk.setattr(casanovo, "__version__", version)
+            mnk.setattr(editnovo, "__version__", version)
             with pytest.raises(ValueError):
-                casanovo._get_model_weights()
+                editnovo._get_model_weights()
 
     # Test GitHub API rate limit.
     def request(self, *args, **kwargs):
@@ -108,7 +108,7 @@ def test_get_model_weights(monkeypatch):
         mnk.setattr("appdirs.user_cache_dir", lambda n, a, opinion: tmp_dir)
         mnk.setattr("github.Requester.Requester.requestJsonAndCheck", request)
         with pytest.raises(github.RateLimitExceededException):
-            casanovo._get_model_weights()
+            editnovo._get_model_weights()
 
 
 def test_tensorboard():

@@ -32,10 +32,10 @@ class MztabWriter:
             ("mzTab-type", "Identification"),
             (
                 "description",
-                f"Casanovo identification file "
+                f"editnovo identification file "
                 f"{os.path.splitext(os.path.basename(self.filename))[0]}",
             ),
-            ("software[1]", f"[MS, MS:1003281, Casanovo, {__version__}]"),
+            ("software[1]", f"[MS, MS:1003281, editnovo, {__version__}]"),
             (
                 "psm_search_engine_score[1]",
                 "[MS, MS:1001143, search engine specific score for PSMs, ]",
@@ -190,7 +190,7 @@ class MztabWriter:
                         "null",  # unique
                         "null",  # database
                         "null",  # database_version
-                        f"[MS, MS:1003281, Casanovo, {__version__}]",
+                        f"[MS, MS:1003281, editnovo, {__version__}]",
                         psm[2],  # search_engine_score[1]
                         # FIXME: Modifications should be specified as
                         #  controlled vocabulary terms.

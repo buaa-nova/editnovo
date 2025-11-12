@@ -8,8 +8,8 @@ from typing import Dict, List, Tuple
 import torch
 import torch.nn.functional as F
 
-from casanovo.depthcharge.components.levenstein_util import _apply_del_words, _apply_ins_masks, _apply_ins_words, _fill, _get_del_targets, _get_ins_targets, _skip, _skip_encoder_out, _skip_encoder_out_with_func
-from casanovo.depthcharge.components.transformer_layer import TransformerDecoderLayerBase
+from editnovo.depthcharge.components.levenstein_util import _apply_del_words, _apply_ins_masks, _apply_ins_words, _fill, _get_del_targets, _get_ins_targets, _skip, _skip_encoder_out, _skip_encoder_out_with_func
+from editnovo.depthcharge.components.transformer_layer import TransformerDecoderLayerBase
 
 from .encoders import FloatEncoder, PeakEncoder, PositionalEncoder
 from ..masses import PeptideMass

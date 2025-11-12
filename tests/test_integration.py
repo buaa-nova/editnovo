@@ -4,18 +4,18 @@ from pathlib import Path
 import pyteomics.mztab
 from click.testing import CliRunner
 
-from casanovo import casanovo
+from editnovo import editnovo
 
 
 def test_train_and_run(
     mgf_small, mzml_small, tiny_config, tmp_path, monkeypatch
 ):
     # We can use this to explicitly test different versions.
-    monkeypatch.setattr(casanovo, "__version__", "3.0.1")
+    monkeypatch.setattr(editnovo, "__version__", "3.0.1")
 
     # Run a command:
     run = functools.partial(
-        CliRunner().invoke, casanovo.main, catch_exceptions=False
+        CliRunner().invoke, editnovo.main, catch_exceptions=False
     )
 
     # Train a tiny model:
@@ -90,12 +90,12 @@ def test_train_and_run(
 def test_auxilliary_cli(tmp_path, monkeypatch):
     """Test the secondary CLI commands"""
     run = functools.partial(
-        CliRunner().invoke, casanovo.main, catch_exceptions=False
+        CliRunner().invoke, editnovo.main, catch_exceptions=False
     )
 
     monkeypatch.chdir(tmp_path)
     run("configure")
-    assert Path("casanovo.yaml").exists()
+    assert Path("editnovo.yaml").exists()
 
     run(["configure", "-o", "test.yaml"])
     assert Path("test.yaml").exists()
