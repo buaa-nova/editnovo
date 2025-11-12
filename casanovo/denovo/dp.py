@@ -5,7 +5,7 @@ import torch
 inference_kernel = cp.RawKernel(
 r'''
 extern "C" __global__
-void inference(float* prob, unsigned short* ans, float* aa_masses, float* dp, float* dpMass ,int* lock, int* aa_indexes, float premass, int length, float grid_size, int ncandidates, int top_k, float tol2) {
+void inference(float* prob, unsigned char* ans, float* aa_masses, float* dp, float* dpMass ,int* lock, int* aa_indexes, float premass, int length, float grid_size, int ncandidates, int top_k, float tol2) {
     const int AA_num = 28;
     const float tol = tol2;
     const int word_num = length - 1;
@@ -148,7 +148,7 @@ def knapsack_decode(prob: torch.Tensor, aa_indexes: torch.Tensor, aa_mass: torch
 
         dp = cp.full((cell_num, length, topk), float("-inf"), dtype=cp.float32)
         dp_mass = cp.zeros((cell_num, length, topk), dtype=cp.float32)
-        pathes_indexes = cp.zeros((cell_num, length, topk, word_num), dtype=cp.uint16)
+        pathes_indexes = cp.zeros((cell_num, length, topk, word_num), dtype=cp.uint8)
         lock = cp.zeros((cell_num, length), dtype=cp.int32)
 
         # data initialization
