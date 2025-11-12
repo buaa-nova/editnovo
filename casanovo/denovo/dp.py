@@ -141,9 +141,9 @@ def knapsack_decode(prob: torch.Tensor, aa_indexes: torch.Tensor, aa_mass: torch
         cell_num = int(premass / grid_size) + 1
         if cell_num < 1:
             return None, None, None
-        if cell_num * length * topk * word_num > (1 << 32) - 1:
+        if cell_num * length * topk * word_num > (1 << 31) - 1:
             logging.warning(f"DP table size exceeds limit: {cell_num * length * topk * word_num}")
-            topk = ((1<<32) - 1) // (cell_num * length * word_num)
+            topk = ((1<<31) - 1) // (cell_num * length * word_num)
             logging.warning(f"Reducing topk to {topk} to fit in memory.")
 
         dp = cp.full((cell_num, length, topk), float("-inf"), dtype=cp.float32)
