@@ -7,9 +7,9 @@ from torch.utils.cpp_extension import CppExtension, BuildExtension
 ext_modules = [
     # CPU 版本
     CppExtension(
-        name="casanovo.libnat",                        # 安装后通过 `import casanovo.libnat` 使用
+        name="editnovo.libnat",                        # 安装后通过 `import editnovo.libnat` 使用
         sources=[
-            "casanovo/clib/libnat/edit_dist.cpp",     # 相对路径指向你的 C++ 源文件
+            "editnovo/clib/libnat/edit_dist.cpp",     # 相对路径指向你的 C++ 源文件
         ],
         include_dirs=[],                               # 如果有额外头文件目录，可以在这里添加
     )
@@ -19,10 +19,10 @@ print(os.environ.get("CUDA_HOME", None))
 if os.environ.get("CUDA_HOME", None):
     ext_modules.append(
         CppExtension(
-            name="casanovo.libnat_cuda",                          # 安装后通过 `import casanovo.libnat_cuda` 使用
+            name="editnovo.libnat_cuda",                          # 安装后通过 `import editnovo.libnat_cuda` 使用
             sources=[
-                "casanovo/clib/libnat_cuda/edit_dist.cu",        # CUDA 核函数
-                "casanovo/clib/libnat_cuda/binding.cpp",         # Python 绑定入口
+                "editnovo/clib/libnat_cuda/edit_dist.cu",        # CUDA 核函数
+                "editnovo/clib/libnat_cuda/binding.cpp",         # Python 绑定入口
             ],
             include_dirs=[],                                     # CUDA 头文件路径，若需要可添加
             extra_compile_args={                                 # 给 nvcc 的额外编译参数
@@ -35,7 +35,7 @@ if os.environ.get("CUDA_HOME", None):
 setup(
     name="attennovo",                # 你的项目名字
     version="0.1.0",
-    packages=find_packages(),        # 自动发现 casanovo/ 及子包
+    packages=find_packages(),        # 自动发现 editnovo/ 及子包
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},
 )

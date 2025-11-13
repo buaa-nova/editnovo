@@ -2,8 +2,8 @@ from typing import Dict, List, Optional
 import torch
 import torch.nn as nn
 
-from casanovo.depthcharge.components.levenstein_util import get_activation_fn
-from casanovo.fairseq.multihead_attention import MultiheadAttention
+from editnovo.depthcharge.components.levenstein_util import get_activation_fn
+from editnovo.fairseq.multihead_attention import MultiheadAttention
 
 class TransformerDecoderLayerBase(nn.Module):
     """Decoder layer block.

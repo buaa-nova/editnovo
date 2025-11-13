@@ -19,10 +19,10 @@ from importlib.metadata import version
 
 # -- Project information -----------------------------------------------------
 
-project = "Casanovo"
-copyright = "2022, The Casanovo Team"
-author = "The Casanovo Team"
-release = version("casanovo")
+project = "editnovo"
+copyright = "2025, The editnovo Team"
+author = "The editnovo Team"
+release = version("editnovo")
 version = ".".join(release.split(".")[:2])
 
 # -- General configuration ---------------------------------------------------
@@ -52,13 +52,13 @@ source_suffix = {
 # a list of builtin themes.
 #
 html_theme = "sphinx_book_theme"
-html_title = "Casanovo"
+html_title = "editnovo"
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ["_static"]
-html_theme_options = {"repository_url": "https//github.com/Noble-Lab/casanovo"}
+html_theme_options = {"repository_url": "https://github.com/buaa-nova/editnovo"}
 
 # -- MyST configuration ------------------------------------------------------
 myst_enable_extensions = [

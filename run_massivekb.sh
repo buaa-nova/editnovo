@@ -1,4 +1,4 @@
-# python -m casanovo.casanovo train /root/data/massivekb/massivekb_82c0124b_val.mgf -p /root/data/massivekb/massivekb_82c0124b_val.mgf
+# python -m editnovo.editnovo train /root/data/massivekb/massivekb_82c0124b_val.mgf -p /root/data/massivekb/massivekb_82c0124b_val.mgf
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -6,8 +6,8 @@ set -euo pipefail
 
 # 3) 构造训练命令
 train_command=(
-#   python -m casanovo.casanovo train /root/data/massivekb/casanovo/massivekb_82c0124b_train.mgf
-python -m casanovo.casanovo train /dev/shm/massivekb/369c9972a4984395b7c7e89bee00f217.hdf5 -p /dev/shm/massivekb/ab2797af023147a9943ec09f420f4e84.hdf5
+#   python -m editnovo.editnovo train /root/data/massivekb/editnovo/massivekb_82c0124b_train.mgf
+python -m editnovo.editnovo train /dev/shm/massivekb/369c9972a4984395b7c7e89bee00f217.hdf5 -p /dev/shm/massivekb/ab2797af023147a9943ec09f420f4e84.hdf5
 )
 
 # # 4) 加入测试集（-p 前缀）

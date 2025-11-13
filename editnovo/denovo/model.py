@@ -10,8 +10,8 @@ import warnings
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 import torch.nn.functional as F
 
-from casanovo.denovo.dp import knapsack_decode
-from casanovo.depthcharge.components.levenstein_util import equal_ignore_tokens, is_a_loop, item
+from editnovo.denovo.dp import knapsack_decode
+from editnovo.depthcharge.components.levenstein_util import equal_ignore_tokens, is_a_loop, item
 
 from ..depthcharge.masses import PeptideMass
 import einops
@@ -26,7 +26,7 @@ from . import evaluate
 from .. import config
 from ..data import ms_io
 
-logger = logging.getLogger("casanovo")
+logger = logging.getLogger("editnovo")
 
 DecoderOut = collections.namedtuple(
     "IterativeRefinementDecoderOut",

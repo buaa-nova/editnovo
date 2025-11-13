@@ -21,7 +21,7 @@ def _get_version() -> Optional[str]:
         from importlib.metadata import version, PackageNotFoundError
 
         try:
-            return version("casanovo")
+            return version("editnovo")
         except PackageNotFoundError:
             return None
     except ImportError:
@@ -29,6 +29,6 @@ def _get_version() -> Optional[str]:
         from pkg_resources import get_distribution, DistributionNotFound
 
         try:
-            return get_distribution("casanovo").version
+            return get_distribution("editnovo").version
         except DistributionNotFound:
             return None
