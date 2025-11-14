@@ -29,7 +29,7 @@ warnings.filterwarnings(
 )
 
 import appdirs
-import depthcharge
+# import depthcharge
 import github
 import lightning
 import requests
@@ -225,7 +225,7 @@ def version() -> None:
     """Get the editnovo version information"""
     versions = [
         f"editnovo: {__version__}",
-        f"Depthcharge: {depthcharge.__version__}",
+        # f"Depthcharge: {depthcharge.__version__}",
         f"Lightning: {lightning.__version__}",
         f"PyTorch: {torch.__version__}",
     ]
@@ -307,9 +307,9 @@ def setup_logging(
     warnings_logger.addHandler(file_handler)
 
     # Disable dependency non-critical log messages.
-    logging.getLogger("depthcharge").setLevel(
-        logging_levels[verbosity.lower()]
-    )
+    # logging.getLogger("depthcharge").setLevel(
+    #     logging_levels[verbosity.lower()]
+    # )
     logging.getLogger("fsspec").setLevel(logging.WARNING)
     logging.getLogger("github").setLevel(logging.WARNING)
     logging.getLogger("h5py").setLevel(logging.WARNING)

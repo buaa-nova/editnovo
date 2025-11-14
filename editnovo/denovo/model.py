@@ -1509,8 +1509,20 @@ class Spec2Pep(pl.LightningModule, ModelMixin):
         scores = []
 
         def _is_mass_match(real_mass, predict_mass):
-            abs_delta = abs(real_mass - predict_mass)
-            return abs_delta < 0.1
+            possible_targets = [
+                real_mass,           # 假设它是单一同位素 (799.41)
+                real_mass - 1.00335, # 假设它是第1同位素 (798.41) -> 命中 LYPGHGR！
+                real_mass - 2.0067   # 假设它是第2同位素 (797.40)
+            ]
+
+            is_match = any(
+                abs(predict_mass - candidate) <= 0.1 
+                for candidate in possible_targets
+            )
+            
+            # abs_delta = abs(real_mass - predict_mass)
+            # return abs_delta < 0.1
+            return is_match
 
         n_spectra = 0
 

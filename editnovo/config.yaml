@@ -40,7 +40,7 @@ random_seed: 454
 # Logging frequency in training steps.
 n_log: 1
 # Tensorboard directory to use for keeping track of training metrics.
-tb_summarywriter: "/data/yxm/tmp"
+tb_summarywriter: 
 # Save the top k model checkpoints during training. -1 saves all, and leaving
 # this field empty saves none.
 save_top_k: 5
@@ -52,7 +52,7 @@ model_save_folder_path: "/root/attennovo/checkpoint"
 # val_check_interval: 7_000
 val_check_interval: 3_500
 # val_check_interval: 1
-hdf5_dir: "/data/yxm/tmp"
+hdf5_dir: 
 dump_hdf5: False
 n_workers: 8
 
@@ -142,7 +142,7 @@ no_share_discriminator: False
 sampling_model_gen: 0.6
 
 # for inference
-allow_sampling: True
+allow_sampling: False
 # placeholder sampling number 
 top_k_for_mask_insert: 5
 # tokendecoder top_k
@@ -150,7 +150,7 @@ top_k_for_word_insert: 10
 # tokendecoder sampling number
 sampling_num: 100
 
-tmp_dir: "/data/yxm/tmp"
+tmp_dir: 
 
 # AMINO ACID AND MODIFICATION VOCABULARY
 residues:
