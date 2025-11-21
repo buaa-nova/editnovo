@@ -71,7 +71,7 @@ Some of the important settings in config.yaml under ./editnovo
 
 To evaluate the provided test MGF file (you can replace this MGF file with your own), download the following files:
 
-1. **Model Checkpoint**: [editnovo-massive-kb.ckpt](https://drive.google.com/drive/u/0/folders/1K-J18o_QN71yCo16UPk3ERYzMCJcGe9b)
+1. **Model Checkpoint**: [editnovo-massive-kb.ckpt](https://drive.google.com/file/d/1SOc_XPBBgrgcxGDJApjK7hLs3ao3e2cs/view?usp=sharing)
 2. **Test MGF File**: [Bacillus.10k.mgf](https://drive.google.com/file/d/1HqfCETZLV9ZB-byU0pqNNRXbaPbTAceT/view?usp=drive_link)
 
 **Note:** If you are using a remote server, you can use the `gdown` package to easily download the content from Google Drive to your server disk.
