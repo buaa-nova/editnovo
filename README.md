@@ -1,7 +1,5 @@
 # EditNovo
 
-This is the official repo for the paper: 
-
 We will release the future model update (user-interface, new model weight, optimized modules etc) here, please leave a **star** and **watching** if you want to get notified and follow up.
 
 ## Environment Setup
@@ -26,18 +24,16 @@ then install dependencies:
 pip install -r ./requirements.txt
 ```
 
-Then, compile C++/CUDA Extensions:
+Then, Compile the underlying C++/CUDA extensions to enable high-performance Levenshtein distance calculations:
 
 ```
 python setup.py build_ext --inplace
 ```
 
-The installation automatically compiles:
-
 - **editnovo.libnat**: CPU version edit distance calculation library
 - **editnovo.libnat_cuda**: GPU accelerated version (if CUDA detected)
 
-Lastly, install CuPy to use our CUDA-accelerated precise mass-control decoding:
+Lastly, install CuPy:
 
 **_Please install the following Cupy package in a GPU available env, If you are using a slurm server, this means you have to enter a interative session with sbatch to install Cupy, If you are using a machine with GPU already on it (checking by nvidia-smi), then there's no problem_**
 
@@ -54,16 +50,8 @@ Lastly, install CuPy to use our CUDA-accelerated precise mass-control decoding:
 ## Model Settings
 
 Some of the important settings in config.yaml under ./editnovo
-
-**n_beam**: number of CTC-paths (beams) considered during inference. We recommend a value of 5.
-
-**n_peaks**: Number of the most intense peaks to retain, any remaining peaks are discarded. We recommend a value of 150.
-
-**min_mz**: Minimum peak m/z allowed, peaks with smaller m/z are discarded. We recommend a value of 50.
-
-**max_mz**: Maximum peak m/z allowed, peaks with larger m/z are discarded. We recommend a value of 2500.
-
-**min_intensity**: Min peak intensity allowed, less intense peaks are discarded. We recommend a value of 0.01.
+- **`allow_sampling`**: Set to `True` to enable the **Sample-Edit Post-Processing Strategy** (Default: `False`).
+- **`top_k_for_mask_insert`** / **`top_k_for_word_insert`**: Sampling candidates for placeholders (Default: 5) and words (Default: 10). Only effective when `allow_sampling` is enabled.
 
 ## Run Instructions
 
@@ -93,12 +81,12 @@ Execute the following command in the terminal:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -m editnovo.editnovo evaluate ./bacillus.10k.mgf -m ./model_massive.ckpt
 ```
-This command forces the program to use only GPU 0.
+<!-- This command forces the program to use only GPU 0. -->
 
-If your server has multiple GPUs and you want to utilize all of them to speed up the evaluation:
+<!-- If your server has multiple GPUs and you want to utilize all of them to speed up the evaluation:
 
 ```bash
 python -m editnovo.editnovo evaluate ./bacillus.10k.mgf -m ./model_massive.ckpt
-```
+``` -->
 
-This automatically uses all GPUs available in the current machine.
+<!-- This automatically uses all GPUs available in the current machine. -->
